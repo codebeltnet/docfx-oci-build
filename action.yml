@@ -1,0 +1,106 @@
+name: Build DocFX OCI Artifact from Codebelt
+description: An opinionated action that generates DocFX metadata and exports a verified multi-platform OCI archive from the checked out revision.
+inputs:
+  version:
+    description: Human-selected SemVer release version without the v prefix.
+    required: true
+  revision:
+    description: Full 40-character commit SHA being released.
+    required: true
+  output-path:
+    description: Absolute path for the OCI archive; a .sha256 file is created alongside it.
+    required: true
+  docfx-config:
+    description: DocFX configuration path relative to the workspace.
+    required: false
+    default: .docfx/docfx.json
+  dockerfile:
+    description: DocFX image Dockerfile path relative to the workspace.
+    required: false
+    default: .docfx/Dockerfile.docfx
+  docfx-version:
+    description: DocFX CLI version used to generate metadata.
+    required: false
+    default: 2.81.0
+  platforms:
+    description: Comma-separated target platform list for the OCI image.
+    required: false
+    default: linux/amd64,linux/arm64
+outputs:
+  archive-path:
+    description: Absolute path to the verified OCI archive.
+    value: ${{ steps.build.outputs.archive-path }}
+  checksum-path:
+    description: Absolute path to the archive SHA-256 file.
+    value: ${{ steps.build.outputs.checksum-path }}
+  digest:
+    description: SHA-256 digest of the embedded OCI image index.
+    value: ${{ steps.verify.outputs.digest }}
+runs:
+  using: composite
+  steps:
+    - name: Require .NET 10 SDK
+      shell: pwsh
+      run: |
+        $dotnet = Get-Command dotnet -ErrorAction SilentlyContinue
+        if ($null -eq $dotnet) {
+          throw "This action requires the .NET 10 SDK. Install .NET 10 before invoking codebeltnet/docfx-oci-build."
+        }
+
+        $installedSdkLines = @(& dotnet --list-sdks 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+          throw "Failed to enumerate installed .NET SDKs with 'dotnet --list-sdks'."
+        }
+
+        $installedSdkVersions = @(
+          foreach ($line in $installedSdkLines) {
+            $version = ($line -split '\s+', 2)[0]
+            if ($version) {
+              $version
+            }
+          }
+        )
+        $compatibleSdkVersions = @(
+          foreach ($version in $installedSdkVersions) {
+            if ($version -match '^(?<major>\d+)\.' -and [int]$Matches.major -ge 10) {
+              $version
+            }
+          }
+        )
+        if ($compatibleSdkVersions.Count -eq 0) {
+          $installedSdkDisplay = if ($installedSdkVersions.Count -gt 0) {
+            $installedSdkVersions -join ', '
+          } else {
+            'none'
+          }
+
+          throw "This action requires the .NET 10 SDK or newer. Install .NET 10 or newer before invoking codebeltnet/docfx-oci-build. Installed SDKs: $installedSdkDisplay"
+        }
+
+    - id: build
+      name: Generate DocFX metadata and build the OCI image archive
+      shell: pwsh
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        WORKSPACE_ROOT: ${{ github.workspace }}
+        RELEASE_VERSION: ${{ inputs.version }}
+        RELEASE_REVISION: ${{ inputs.revision }}
+        OUTPUT_PATH: ${{ inputs.output-path }}
+        DOCFX_CONFIG: ${{ inputs.docfx-config }}
+        DOCKERFILE: ${{ inputs.dockerfile }}
+        DOCFX_VERSION: ${{ inputs.docfx-version }}
+        PLATFORMS: ${{ inputs.platforms }}
+      run: |
+        & "$env:ACTION_PATH/scripts/build-docfx-oci.ps1" -Version $env:RELEASE_VERSION -Revision $env:RELEASE_REVISION -OutputPath $env:OUTPUT_PATH -WorkspaceRoot $env:WORKSPACE_ROOT -DocfxConfig $env:DOCFX_CONFIG -Dockerfile $env:DOCKERFILE -DocfxVersion $env:DOCFX_VERSION -Platforms $env:PLATFORMS
+
+    - id: verify
+      name: Verify the newly built OCI artifact
+      uses: codebeltnet/oci-artifact-verify@v1
+      with:
+        archive-path: ${{ steps.build.outputs.archive-path }}
+        checksum-path: ${{ steps.build.outputs.checksum-path }}
+        version: ${{ inputs.version }}
+        revision: ${{ inputs.revision }}
+branding:
+  icon: 'umbrella'
+  color: 'blue'
