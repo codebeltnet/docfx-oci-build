@@ -22,7 +22,9 @@ param(
     [string]$DocfxVersion,
 
     [Parameter(Mandatory = $true)]
-    [string]$Platforms
+    [string]$Platforms,
+
+    [string]$FrameworkViews
 )
 
 $ErrorActionPreference = 'Stop'
@@ -57,114 +59,116 @@ $dockerfilePath = if ([System.IO.Path]::IsPathRooted($Dockerfile)) {
 if (-not (Test-Path -LiteralPath $docfxConfigPath -PathType Leaf)) {
     throw "DocFX configuration was not found: $docfxConfigPath"
 }
-if (-not (Test-Path -LiteralPath $dockerfilePath -PathType Leaf)) {
+if (-not $FrameworkViews -and -not (Test-Path -LiteralPath $dockerfilePath -PathType Leaf)) {
     throw "DocFX Dockerfile was not found: $dockerfilePath"
 }
 
 $docfxRoot = Split-Path -Parent $docfxConfigPath
 $docfxConfigName = Split-Path -Leaf $docfxConfigPath
-$sourceRoot = [System.IO.Path]::GetFullPath((Join-Path $docfxRoot '../src'))
-$docfxConfigObject = Get-Content -LiteralPath $docfxConfigPath -Raw | ConvertFrom-Json
-$metadataProjectPatterns = @(
-    foreach ($metadata in $docfxConfigObject.metadata) {
-        foreach ($source in $metadata.src) {
-            $metadataSourceRoot = if ($source.src) {
-                [System.IO.Path]::GetFullPath((Join-Path $docfxRoot $source.src))
-            } else {
-                $docfxRoot
-            }
+if (!$FrameworkViews) {
+    $sourceRoot = [System.IO.Path]::GetFullPath((Join-Path $docfxRoot '../src'))
+    $docfxConfigObject = Get-Content -LiteralPath $docfxConfigPath -Raw | ConvertFrom-Json
+    $metadataProjectPatterns = @(
+        foreach ($metadata in $docfxConfigObject.metadata) {
+            foreach ($source in $metadata.src) {
+                $metadataSourceRoot = if ($source.src) {
+                    [System.IO.Path]::GetFullPath((Join-Path $docfxRoot $source.src))
+                } else {
+                    $docfxRoot
+                }
 
-            foreach ($file in $source.files) {
-                (Join-Path $metadataSourceRoot $file).Replace('/', [System.IO.Path]::DirectorySeparatorChar)
-            }
-        }
-    }
-)
-
-if (-not (Test-Path -LiteralPath $sourceRoot -PathType Container)) {
-    throw "The metadata source root was not found: $sourceRoot"
-}
-$sourceProjects = @(Get-ChildItem -LiteralPath $sourceRoot -Recurse -File -Filter '*.csproj')
-$metadataProjects = @(
-    $sourceProjects |
-        Where-Object {
-            $projectPath = $_.FullName
-            foreach ($pattern in $metadataProjectPatterns) {
-                if ($projectPath -like $pattern) {
-                    return $true
+                foreach ($file in $source.files) {
+                    (Join-Path $metadataSourceRoot $file).Replace('/', [System.IO.Path]::DirectorySeparatorChar)
                 }
             }
-
-            return $false
         }
-)
+    )
 
-$sourceProjectsHaveRestoreAssets = $sourceProjects.Count -gt 0
-foreach ($project in $sourceProjects) {
-    $restoreAssetsPath = Join-Path $project.DirectoryName 'obj/project.assets.json'
-    if (-not (Test-Path -LiteralPath $restoreAssetsPath -PathType Leaf)) {
-        $sourceProjectsHaveRestoreAssets = $false
-        break
+    if (-not (Test-Path -LiteralPath $sourceRoot -PathType Container)) {
+        throw "The metadata source root was not found: $sourceRoot"
     }
-}
+    $sourceProjects = @(Get-ChildItem -LiteralPath $sourceRoot -Recurse -File -Filter '*.csproj')
+    $metadataProjects = @(
+        $sourceProjects |
+            Where-Object {
+                $projectPath = $_.FullName
+                foreach ($pattern in $metadataProjectPatterns) {
+                    if ($projectPath -like $pattern) {
+                        return $true
+                    }
+                }
 
-$useNoRestore = $metadataProjects.Count -gt 0 -and $sourceProjectsHaveRestoreAssets
-$restoreInputNames = @('Directory.Build.props', 'Directory.Build.targets', 'Directory.Packages.props', 'NuGet.Config', 'nuget.config', 'global.json')
-foreach ($project in $metadataProjects) {
-    $restoreAssetsPath = Join-Path $project.DirectoryName 'obj/project.assets.json'
-    if (-not (Test-Path -LiteralPath $restoreAssetsPath -PathType Leaf)) {
-        $useNoRestore = $false
-        break
-    }
-
-    $restoreAssetsLastWriteTime = (Get-Item -LiteralPath $restoreAssetsPath).LastWriteTimeUtc
-    $restoreInputPaths = [System.Collections.Generic.List[string]]::new()
-    $restoreInputPaths.Add($project.FullName)
-
-    $inputDirectory = $project.DirectoryName
-    while ($inputDirectory) {
-        foreach ($name in $restoreInputNames) {
-            $restoreInputPath = Join-Path $inputDirectory $name
-            if (Test-Path -LiteralPath $restoreInputPath -PathType Leaf) {
-                $restoreInputPaths.Add($restoreInputPath)
+                return $false
             }
-        }
+    )
 
-        $parentDirectory = Split-Path -Parent $inputDirectory
-        if (-not $parentDirectory -or $parentDirectory -eq $inputDirectory) {
+    $sourceProjectsHaveRestoreAssets = $sourceProjects.Count -gt 0
+    foreach ($project in $sourceProjects) {
+        $restoreAssetsPath = Join-Path $project.DirectoryName 'obj/project.assets.json'
+        if (-not (Test-Path -LiteralPath $restoreAssetsPath -PathType Leaf)) {
+            $sourceProjectsHaveRestoreAssets = $false
             break
         }
-
-        $inputDirectory = $parentDirectory
     }
 
-    $lockFilePath = Join-Path $project.DirectoryName 'packages.lock.json'
-    if (Test-Path -LiteralPath $lockFilePath -PathType Leaf) {
-        $restoreInputPaths.Add($lockFilePath)
-    }
-
-    $userNuGetConfigPaths = [System.Collections.Generic.List[string]]::new()
-    if ($env:APPDATA) {
-        $userNuGetConfigPaths.Add((Join-Path $env:APPDATA 'NuGet/NuGet.Config'))
-    }
-    if ($env:HOME) {
-        $userNuGetConfigPaths.Add((Join-Path $env:HOME '.nuget/NuGet/NuGet.Config'))
-    }
-    foreach ($userNuGetConfigPath in $userNuGetConfigPaths) {
-        if (Test-Path -LiteralPath $userNuGetConfigPath -PathType Leaf) {
-            $restoreInputPaths.Add($userNuGetConfigPath)
-        }
-    }
-
-    foreach ($restoreInputPath in $restoreInputPaths | Sort-Object -Unique) {
-        if ((Get-Item -LiteralPath $restoreInputPath).LastWriteTimeUtc -gt $restoreAssetsLastWriteTime) {
+    $useNoRestore = $metadataProjects.Count -gt 0 -and $sourceProjectsHaveRestoreAssets
+    $restoreInputNames = @('Directory.Build.props', 'Directory.Build.targets', 'Directory.Packages.props', 'NuGet.Config', 'nuget.config', 'global.json')
+    foreach ($project in $metadataProjects) {
+        $restoreAssetsPath = Join-Path $project.DirectoryName 'obj/project.assets.json'
+        if (-not (Test-Path -LiteralPath $restoreAssetsPath -PathType Leaf)) {
             $useNoRestore = $false
             break
         }
-    }
 
-    if (-not $useNoRestore) {
-        break
+        $restoreAssetsLastWriteTime = (Get-Item -LiteralPath $restoreAssetsPath).LastWriteTimeUtc
+        $restoreInputPaths = [System.Collections.Generic.List[string]]::new()
+        $restoreInputPaths.Add($project.FullName)
+
+        $inputDirectory = $project.DirectoryName
+        while ($inputDirectory) {
+            foreach ($name in $restoreInputNames) {
+                $restoreInputPath = Join-Path $inputDirectory $name
+                if (Test-Path -LiteralPath $restoreInputPath -PathType Leaf) {
+                    $restoreInputPaths.Add($restoreInputPath)
+                }
+            }
+
+            $parentDirectory = Split-Path -Parent $inputDirectory
+            if (-not $parentDirectory -or $parentDirectory -eq $inputDirectory) {
+                break
+            }
+
+            $inputDirectory = $parentDirectory
+        }
+
+        $lockFilePath = Join-Path $project.DirectoryName 'packages.lock.json'
+        if (Test-Path -LiteralPath $lockFilePath -PathType Leaf) {
+            $restoreInputPaths.Add($lockFilePath)
+        }
+
+        $userNuGetConfigPaths = [System.Collections.Generic.List[string]]::new()
+        if ($env:APPDATA) {
+            $userNuGetConfigPaths.Add((Join-Path $env:APPDATA 'NuGet/NuGet.Config'))
+        }
+        if ($env:HOME) {
+            $userNuGetConfigPaths.Add((Join-Path $env:HOME '.nuget/NuGet/NuGet.Config'))
+        }
+        foreach ($userNuGetConfigPath in $userNuGetConfigPaths) {
+            if (Test-Path -LiteralPath $userNuGetConfigPath -PathType Leaf) {
+                $restoreInputPaths.Add($userNuGetConfigPath)
+            }
+        }
+
+        foreach ($restoreInputPath in $restoreInputPaths | Sort-Object -Unique) {
+            if ((Get-Item -LiteralPath $restoreInputPath).LastWriteTimeUtc -gt $restoreAssetsLastWriteTime) {
+                $useNoRestore = $false
+                break
+            }
+        }
+
+        if (-not $useNoRestore) {
+            break
+        }
     }
 }
 
@@ -196,16 +200,38 @@ if (-not ($platformList -contains 'linux/amd64') -or -not ($platformList -contai
 $apiRoot = Join-Path $docfxRoot 'api'
 $builderName = "docfx-oci-$PID"
 $builderCreated = $false
+$frameworkRoot = $null
+$contextPath = $docfxRoot
 Push-Location $docfxRoot
 try {
-    if ($useNoRestore) {
+    if ($FrameworkViews) {
+        $settingsPath = [IO.Path]::GetFullPath($FrameworkViews, $workspaceRoot)
+        $settings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json -AsHashtable
+        $frameworkRoot = Join-Path $runnerTemp "docfx-framework-oci-$([guid]::NewGuid().ToString('N'))"
+        $frameworkArguments = @{
+            DocfxConfig = $docfxConfigPath
+            OutputRoot = "$frameworkRoot/build"
+            ApiPath = $settings.apiPath
+            DefaultFramework = $settings.defaultFramework
+            Framework = $settings.frameworks
+            AlignAssemblyVersion = [bool]$settings.alignAssemblyVersion
+            BuildInContainer = $true
+        }
+        if ($settings.builderImage) { $frameworkArguments.BuilderImage = $settings.builderImage }
+        if ($settings.templatePath) { $frameworkArguments.SharedTemplatePath = [IO.Path]::GetFullPath($settings.templatePath, $workspaceRoot) }
+        & "$PSScriptRoot/Build-DocfxFrameworkViews.ps1" @frameworkArguments
+        $contextPath = "$frameworkRoot/image"
+        New-Item -ItemType Directory -Path $contextPath | Out-Null
+        Move-Item -LiteralPath "$frameworkRoot/build/site", "$frameworkRoot/build/nginx.conf" -Destination $contextPath
+        $dockerfilePath = "$PSScriptRoot/framework-views.Dockerfile"
+    } elseif ($useNoRestore) {
         Write-Host 'All restore assets match current restore inputs; generating DocFX metadata without restoring again.'
         & docfx metadata $docfxConfigName --noRestore
     } else {
         Write-Host 'Restore assets are missing or stale; allowing DocFX metadata to restore its source projects.'
         & docfx metadata $docfxConfigName
     }
-    if ($LASTEXITCODE -ne 0) {
+    if (!$FrameworkViews -and $LASTEXITCODE -ne 0) {
         throw "DocFX metadata generation failed with exit code $LASTEXITCODE."
     }
 
@@ -233,7 +259,7 @@ try {
         '--annotation', "index:org.opencontainers.image.version=$Version"
         '--annotation', "index:org.opencontainers.image.revision=$Revision"
         '--output', $outputSpec
-        $docfxRoot
+        $contextPath
     )
     & docker buildx @buildArguments
     if ($LASTEXITCODE -ne 0) {
@@ -245,7 +271,11 @@ try {
     }
     Pop-Location
 
-    if (Test-Path -LiteralPath $apiRoot -PathType Container) {
+    if ($frameworkRoot -and (Test-Path -LiteralPath $frameworkRoot -PathType Container)) {
+        $temporary = (Resolve-Path -LiteralPath $frameworkRoot).Path
+        $relative = [IO.Path]::GetRelativePath([IO.Path]::GetFullPath($runnerTemp), $temporary)
+        if ($relative -match '^docfx-framework-oci-[a-f0-9]{32}$') { Remove-Item -LiteralPath $temporary -Recurse -Force }
+    } elseif (!$FrameworkViews -and (Test-Path -LiteralPath $apiRoot -PathType Container)) {
         Get-ChildItem -LiteralPath $apiRoot -Recurse -File |
             Where-Object { $_.Extension -eq '.yml' -or $_.Name -eq '.manifest' } |
             Remove-Item -Force
