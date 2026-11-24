@@ -1,15 +1,16 @@
 #requires -Version 7.0
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Explicit')]
 param(
     [Parameter(Mandatory)][string] $DocfxConfig,
     [Parameter(Mandatory)][string] $OutputRoot,
-    [Parameter(Mandatory)][string] $DefaultFramework,
-    [Parameter(Mandatory)][string] $ApiPath,
-    [string[]] $Framework,
-    [string] $SharedTemplatePath,
-    [string] $BuilderImage = 'codebeltnet/docfx:2',
-    [switch] $BuildInContainer,
-    [switch] $AlignAssemblyVersion,
+    [Parameter(Mandatory, ParameterSetName = 'Settings')][string] $SettingsPath,
+    [Parameter(Mandatory, ParameterSetName = 'Explicit')][string] $DefaultFramework,
+    [Parameter(Mandatory, ParameterSetName = 'Explicit')][string] $ApiPath,
+    [Parameter(ParameterSetName = 'Explicit')][string[]] $Framework,
+    [Parameter(ParameterSetName = 'Explicit')][string] $SharedTemplatePath,
+    [Parameter(ParameterSetName = 'Explicit')][string] $BuilderImage,
+    [Parameter(ParameterSetName = 'Explicit')][switch] $BuildInContainer,
+    [Parameter(ParameterSetName = 'Explicit')][switch] $AlignAssemblyVersion,
     [switch] $NoRestore,
     [switch] $ForceMetadata,
     [string] $MetadataCache,
@@ -47,7 +48,24 @@ function Get-MetadataFingerprint([string[]] $Directories) {
 
 $configPath = (Resolve-Path -LiteralPath $DocfxConfig).Path
 $source = Split-Path -Parent $configPath
-$work = [IO.Path]::GetFullPath($OutputRoot)
+if ($SettingsPath) {
+    $SettingsPath = (Resolve-Path -LiteralPath $SettingsPath).Path
+    $settings = Read-Json $SettingsPath
+    $ApiPath = $settings.apiPath
+    $DefaultFramework = $settings.defaultFramework
+    $Framework = $settings.frameworks
+    $AlignAssemblyVersion = [bool]$settings.alignAssemblyVersion
+    $BuilderImage = $settings.builderImage
+    $BuildInContainer = [bool]$BuilderImage
+    if ($settings.templatePath) {
+        $SharedTemplatePath = [IO.Path]::GetFullPath($settings.templatePath, (Split-Path -Parent $SettingsPath))
+    }
+}
+if (!$DefaultFramework) { throw 'Specify the default framework in the settings or with -DefaultFramework.' }
+if ((!$SharedTemplatePath -or $BuildInContainer) -and !$BuilderImage) {
+    throw 'Specify a framework-aware template path for native rendering or an explicit DocFX builder image.'
+}
+$work = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputRoot)
 $relativeWork = [IO.Path]::GetRelativePath($source, $work)
 if ($relativeWork -eq '.' -or ($relativeWork -ne '..' -and !$relativeWork.StartsWith("..$([IO.Path]::DirectorySeparatorChar)") -and ![IO.Path]::IsPathRooted($relativeWork))) {
     throw 'Place the framework output outside the DocFX input directory.'
@@ -57,7 +75,7 @@ if ((Test-Path -LiteralPath $work) -and @(Get-ChildItem -LiteralPath $work -Forc
 }
 if ($ApiPath -cnotmatch '^[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*$') { throw "Invalid API path: $ApiPath" }
 if ($MetadataCache -and !$MetadataCacheKey) { throw 'A metadata cache requires a metadata input fingerprint.' }
-if ($MetadataCache) { $MetadataCache = [IO.Path]::GetFullPath($MetadataCache) }
+if ($MetadataCache) { $MetadataCache = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($MetadataCache) }
 if ($SharedTemplatePath) { $SharedTemplatePath = (Resolve-Path -LiteralPath $SharedTemplatePath).Path }
 New-Item -ItemType Directory -Path $work -Force | Out-Null
 Write-Host "Artifacts: $work"
@@ -75,19 +93,39 @@ foreach ($group in $config.metadata) {
     }
 }
 
-$docfx = (Get-Command docfx -CommandType Application | Select-Object -First 1).Source
-$version = (& $docfx --version).Trim()
-if ($LASTEXITCODE -ne 0) { throw 'Could not determine the installed DocFX version.' }
-$store = Join-Path (Split-Path -Parent $docfx) ".store/docfx/$($version.Split('+')[0])/docfx/$($version.Split('+')[0])/tools"
+$supportedDocfx = '2.81.0'
+$docfx = (Get-Command docfx -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+if (!$docfx) { throw "Install DocFX $supportedDocfx as a .NET tool and add its executable to PATH." }
+$version = & $docfx --version
+if ($LASTEXITCODE -ne 0 -or !$version) { throw 'Could not determine the installed DocFX version.' }
+$version = $version.Trim()
+if (($version -split '\+', 2)[0] -cne $supportedDocfx) {
+    throw "Framework views use DocFX $supportedDocfx for project discovery. Install that CLI version (found '$version')."
+}
+$store = Join-Path (Split-Path -Parent $docfx) ".store/docfx/$supportedDocfx/docfx/$supportedDocfx/tools"
+if (!(Test-Path -LiteralPath $store -PathType Container)) {
+    throw "DocFX $supportedDocfx mapping libraries were not found in '$store'. Install DocFX as a global or --tool-path .NET tool."
+}
 $tools = Get-ChildItem -LiteralPath $store -Filter Docfx.Glob.dll -File -Recurse | Sort-Object {
     [version]($_.Directory.Parent.Name.Substring(3))
 } | Select-Object -First 1
 if (!$tools) { throw "Install DocFX as a .NET tool so its mapping library can be found in $store." }
 $resolver = "$PSScriptRoot/Resolve-DocfxProjects.cs"
 $resolvedPath = "$work/projects.json"
+$resolverDirectory = "$work/resolver"
+New-Item -ItemType Directory -Path $resolverDirectory | Out-Null
+# The file-based app needs .NET 10 or later even if the project pins an older SDK.
+Write-Json "$resolverDirectory/global.json" @{ sdk = @{ version = '10.0.100'; rollForward = 'latestMajor'; allowPrerelease = $true } }
+Push-Location $resolverDirectory
+try {
+    Invoke-Step "$work/resolver-sdk.log" dotnet @('--version')
+    $resolverSdk = (Get-Content -LiteralPath "$work/resolver-sdk.log" -Raw).Trim()
+    Invoke-Step "$work/discovery.log" dotnet @('run', '--file', $resolver, '--', $tools.DirectoryName, $configPath, $resolvedPath)
+} finally {
+    Pop-Location
+}
 Push-Location $source
 try {
-    Invoke-Step "$work/discovery.log" dotnet @('run', '--file', $resolver, '--', $tools.DirectoryName, $configPath, $resolvedPath)
     $mappings = Read-Json $resolvedPath
     $projects = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
     $groups = for ($groupIndex = 0; $groupIndex -lt $config.metadata.Count; $groupIndex++) {
@@ -107,7 +145,11 @@ try {
                     if (!$projects.ContainsKey($path)) {
                         $evaluation = & dotnet msbuild $path -nologo -getProperty:TargetFrameworks,TargetFramework @properties
                         if ($LASTEXITCODE -ne 0) { throw "MSBuild evaluation failed for $path." }
-                        $evaluated = ($evaluation | Out-String | ConvertFrom-Json).Properties
+                        # SDK first-run messages and project warnings can precede the property JSON.
+                        $evaluationText = $evaluation -join "`n"
+                        $propertyJson = [regex]::Match($evaluationText, '(?ms)^\{\n.*?^\}$')
+                        if (!$propertyJson.Success) { throw "MSBuild did not return target framework properties for ${path}: $evaluationText" }
+                        $evaluated = ($propertyJson.Value | ConvertFrom-Json).Properties
                         $targets = @("$($evaluated.TargetFrameworks);$($evaluated.TargetFramework)" -split ';' | Where-Object { $_ } | Select-Object -Unique)
                         if (!$targets.Count) { throw "No target frameworks for $path." }
                         $projects[$path] = @{ targets = $targets; properties = $properties; id = $projects.Count }
@@ -159,8 +201,8 @@ try {
     $sdk = (& dotnet --version).Trim()
     if ($LASTEXITCODE -ne 0) { throw 'Could not determine the selected .NET SDK.' }
     if ($MetadataCache) {
-        $cacheVersion = @(Get-FileHash -LiteralPath $PSCommandPath, $resolver, $configPath | ForEach-Object Hash) -join ':'
-        $cacheInputs = "$version/$sdk/$cacheVersion/$MetadataCacheKey/$DefaultFramework/$($Framework -join ',')/$AlignAssemblyVersion"
+        $cacheVersion = @(Get-FileHash -LiteralPath $PSCommandPath, $resolver, $configPath, $resolvedPath | ForEach-Object Hash) -join ':'
+        $cacheInputs = "$version/$sdk/$resolverSdk/$cacheVersion/$MetadataCacheKey/$DefaultFramework/$($Framework -join ',')/$AlignAssemblyVersion"
         $cacheId = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($cacheInputs)))
         $cacheRoot = "$MetadataCache/$cacheId"
         New-Item -ItemType Directory -Path $cacheRoot -Force | Out-Null
