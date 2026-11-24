@@ -15,13 +15,15 @@ inputs:
     required: false
     default: .docfx/docfx.json
   dockerfile:
-    description: DocFX image Dockerfile path relative to the workspace.
+    description: Workspace-relative Dockerfile, or bundled-framework-views to opt into the standard framework-view image. Defaults to .docfx/Dockerfile.docfx for legacy builds.
     required: false
-    default: .docfx/Dockerfile.docfx
   docfx-version:
     description: DocFX CLI version used to generate metadata.
     required: false
     default: 2.81.0
+  framework-views:
+    description: Path to the optional framework views settings JSON, relative to the workspace.
+    required: false
   platforms:
     description: Comma-separated target platform list for the OCI image.
     required: false
@@ -89,9 +91,10 @@ runs:
         DOCFX_CONFIG: ${{ inputs.docfx-config }}
         DOCKERFILE: ${{ inputs.dockerfile }}
         DOCFX_VERSION: ${{ inputs.docfx-version }}
+        FRAMEWORK_VIEWS: ${{ inputs.framework-views }}
         PLATFORMS: ${{ inputs.platforms }}
       run: |
-        & "$env:ACTION_PATH/scripts/build-docfx-oci.ps1" -Version $env:RELEASE_VERSION -Revision $env:RELEASE_REVISION -OutputPath $env:OUTPUT_PATH -WorkspaceRoot $env:WORKSPACE_ROOT -DocfxConfig $env:DOCFX_CONFIG -Dockerfile $env:DOCKERFILE -DocfxVersion $env:DOCFX_VERSION -Platforms $env:PLATFORMS
+        & "$env:ACTION_PATH/scripts/build-docfx-oci.ps1" -Version $env:RELEASE_VERSION -Revision $env:RELEASE_REVISION -OutputPath $env:OUTPUT_PATH -WorkspaceRoot $env:WORKSPACE_ROOT -DocfxConfig $env:DOCFX_CONFIG -Dockerfile $env:DOCKERFILE -DocfxVersion $env:DOCFX_VERSION -Platforms $env:PLATFORMS -FrameworkViews $env:FRAMEWORK_VIEWS
 
     - id: verify
       name: Verify the newly built OCI artifact
