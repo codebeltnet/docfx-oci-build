@@ -15,9 +15,8 @@ inputs:
     required: false
     default: .docfx/docfx.json
   dockerfile:
-    description: DocFX image Dockerfile path relative to the workspace.
+    description: Workspace-relative Dockerfile, or bundled-framework-views to opt into the standard framework-view image. Defaults to .docfx/Dockerfile.docfx for legacy builds.
     required: false
-    default: .docfx/Dockerfile.docfx
   docfx-version:
     description: DocFX CLI version used to generate metadata.
     required: false

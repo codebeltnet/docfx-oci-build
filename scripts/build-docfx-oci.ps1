@@ -15,7 +15,6 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$DocfxConfig,
 
-    [Parameter(Mandatory = $true)]
     [string]$Dockerfile,
 
     [Parameter(Mandatory = $true)]
@@ -51,7 +50,16 @@ $docfxConfigPath = if ([System.IO.Path]::IsPathRooted($DocfxConfig)) {
 } else {
     [System.IO.Path]::GetFullPath((Join-Path $workspaceRoot $DocfxConfig))
 }
-$dockerfilePath = if ([System.IO.Path]::IsPathRooted($Dockerfile)) {
+if (!$Dockerfile) {
+    if ($FrameworkViews) {
+        throw "Framework views require an explicit dockerfile input. Use 'bundled-framework-views' to adopt the standard NGINX image and verification, or specify a compatible consumer Dockerfile."
+    }
+    $Dockerfile = '.docfx/Dockerfile.docfx'
+}
+$bundledPackaging = $FrameworkViews -and $Dockerfile -ceq 'bundled-framework-views'
+$dockerfilePath = if ($bundledPackaging) {
+    "$PSScriptRoot/framework-views.Dockerfile"
+} elseif ([System.IO.Path]::IsPathRooted($Dockerfile)) {
     [System.IO.Path]::GetFullPath($Dockerfile)
 } else {
     [System.IO.Path]::GetFullPath((Join-Path $workspaceRoot $Dockerfile))
@@ -59,7 +67,7 @@ $dockerfilePath = if ([System.IO.Path]::IsPathRooted($Dockerfile)) {
 if (-not (Test-Path -LiteralPath $docfxConfigPath -PathType Leaf)) {
     throw "DocFX configuration was not found: $docfxConfigPath"
 }
-if (-not $FrameworkViews -and -not (Test-Path -LiteralPath $dockerfilePath -PathType Leaf)) {
+if (-not (Test-Path -LiteralPath $dockerfilePath -PathType Leaf)) {
     throw "DocFX Dockerfile was not found: $dockerfilePath"
 }
 
@@ -206,24 +214,12 @@ Push-Location $docfxRoot
 try {
     if ($FrameworkViews) {
         $settingsPath = [IO.Path]::GetFullPath($FrameworkViews, $workspaceRoot)
-        $settings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json -AsHashtable
         $frameworkRoot = Join-Path $runnerTemp "docfx-framework-oci-$([guid]::NewGuid().ToString('N'))"
-        $frameworkArguments = @{
-            DocfxConfig = $docfxConfigPath
-            OutputRoot = "$frameworkRoot/build"
-            ApiPath = $settings.apiPath
-            DefaultFramework = $settings.defaultFramework
-            Framework = $settings.frameworks
-            AlignAssemblyVersion = [bool]$settings.alignAssemblyVersion
-            BuildInContainer = $true
-        }
-        if ($settings.builderImage) { $frameworkArguments.BuilderImage = $settings.builderImage }
-        if ($settings.templatePath) { $frameworkArguments.SharedTemplatePath = [IO.Path]::GetFullPath($settings.templatePath, $workspaceRoot) }
-        & "$PSScriptRoot/Build-DocfxFrameworkViews.ps1" @frameworkArguments
+        & "$PSScriptRoot/Build-DocfxFrameworkViews.ps1" -DocfxConfig $docfxConfigPath `
+            -OutputRoot "$frameworkRoot/build" -SettingsPath $settingsPath
         $contextPath = "$frameworkRoot/image"
         New-Item -ItemType Directory -Path $contextPath | Out-Null
         Move-Item -LiteralPath "$frameworkRoot/build/site", "$frameworkRoot/build/nginx.conf" -Destination $contextPath
-        $dockerfilePath = "$PSScriptRoot/framework-views.Dockerfile"
     } elseif ($useNoRestore) {
         Write-Host 'All restore assets match current restore inputs; generating DocFX metadata without restoring again.'
         & docfx metadata $docfxConfigName --noRestore
@@ -259,6 +255,7 @@ try {
         '--annotation', "index:org.opencontainers.image.version=$Version"
         '--annotation', "index:org.opencontainers.image.revision=$Revision"
         '--output', $outputSpec
+        if ($FrameworkViews -and !$bundledPackaging) { '--build-context'; "docfx-source=$docfxRoot" }
         $contextPath
     )
     & docker buildx @buildArguments
