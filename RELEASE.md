@@ -6,7 +6,7 @@ The action exposes the documentation archive, detached SHA-256 checksum and OCI 
 
 ## Release dependency
 
-The approved builder is `codebeltnet/docfx:2.81.0-v1.1.0`. The upstream PR was merged as `aa0150169358bc9a5763cf644778f442e174e49e`. Its Docker Hub tag must be promoted before the action's framework-view path can be used from the registry. The upstream release workflow produces, verifies and promotes the builder OCI artifact. This repository uses that image to produce a separate consumer documentation OCI artifact. [Upstream PR #4](https://github.com/codebeltnet/docfx/pull/4)
+The approved builder is `codebeltnet/docfx:2.81.0-v1.1.0`. The upstream PR was merged as `aa0150169358bc9a5763cf644778f442e174e49e`. The published Docker Hub tag resolves to the verified release's OCI index, `sha256:40446dfb0045d02ac281190c20eb8a1c9c06797dbe59a710c7078bcd7179346a`, with `linux/amd64` and `linux/arm64`. The action selects the release by tag and records the digest here as publication evidence. It uses the builder to produce a separate consumer documentation OCI artifact. [Upstream PR #4](https://github.com/codebeltnet/docfx/pull/4) · [Verified release metadata](https://github.com/codebeltnet/docfx/releases/download/v1.1.0/docfx-release.json)
 
 ## Updating the builder dependency
 
