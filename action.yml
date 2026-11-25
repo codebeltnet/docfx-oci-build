@@ -15,15 +15,16 @@ inputs:
     required: false
     default: .docfx/docfx.json
   dockerfile:
-    description: Workspace-relative Dockerfile, or bundled-framework-views to use standard packaging from the DocFX builder image. Defaults to .docfx/Dockerfile.docfx for legacy builds.
+    description: Workspace-relative Dockerfile. Defaults to the bundled framework-view Dockerfile when enabled and .docfx/Dockerfile.docfx otherwise.
     required: false
   docfx-version:
     description: DocFX CLI version for legacy metadata. Framework-view builds use the CLI in the builder image.
     required: false
     default: 2.81.0
   framework-views:
-    description: Path to the optional framework views settings JSON, relative to the workspace.
+    description: Set to true to build native documentation views for the evaluated project frameworks.
     required: false
+    default: 'false'
   platforms:
     description: Comma-separated target platform list for the OCI image.
     required: false

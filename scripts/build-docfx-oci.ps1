@@ -22,11 +22,15 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Platforms,
 
-    [string]$FrameworkViews
+    [string]$FrameworkViews = 'false'
 )
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
+$frameworkViewsEnabled = $false
+if (![bool]::TryParse($FrameworkViews, [ref] $frameworkViewsEnabled)) {
+    throw "Set framework-views to 'true' or 'false'."
+}
 
 $semverPattern = '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?$'
 if ($Version -notmatch $semverPattern) {
@@ -51,13 +55,9 @@ $docfxConfigPath = if ([System.IO.Path]::IsPathRooted($DocfxConfig)) {
 } else {
     [System.IO.Path]::GetFullPath((Join-Path $workspaceRoot $DocfxConfig))
 }
-if (!$Dockerfile) {
-    if ($FrameworkViews) {
-        throw "Framework views require an explicit dockerfile input. Use 'bundled-framework-views' to adopt the standard NGINX image and verification, or specify a compatible consumer Dockerfile."
-    }
-    $Dockerfile = '.docfx/Dockerfile.docfx'
-}
-$bundledPackaging = $FrameworkViews -and $Dockerfile -ceq 'bundled-framework-views'
+$bundledPackaging = $frameworkViewsEnabled -and !$Dockerfile
+if (!$bundledPackaging -and !$Dockerfile) { $Dockerfile = '.docfx/Dockerfile.docfx' }
+
 $dockerfilePath = if (!$bundledPackaging -and [System.IO.Path]::IsPathRooted($Dockerfile)) {
     [System.IO.Path]::GetFullPath($Dockerfile)
 } elseif (!$bundledPackaging) {
@@ -70,17 +70,10 @@ if (!$bundledPackaging -and -not (Test-Path -LiteralPath $dockerfilePath -PathTy
     throw "DocFX Dockerfile was not found: $dockerfilePath"
 }
 
-if ($FrameworkViews) {
-    $settingsPath = [IO.Path]::GetFullPath($FrameworkViews, $workspaceRoot)
-    if (!(Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
-        throw "Framework views settings were not found: $settingsPath"
-    }
+if ($frameworkViewsEnabled) {
     $configRelative = [IO.Path]::GetRelativePath($workspaceRoot, $docfxConfigPath).Replace('\', '/')
-    $settingsRelative = [IO.Path]::GetRelativePath($workspaceRoot, $settingsPath).Replace('\', '/')
-    foreach ($relative in $configRelative, $settingsRelative) {
-        if ([IO.Path]::IsPathRooted($relative) -or $relative -eq '..' -or $relative.StartsWith('../')) {
-            throw 'Framework views require docfx-config and framework-views paths inside the checked-out workspace.'
-        }
+    if ([IO.Path]::IsPathRooted($configRelative) -or $configRelative -eq '..' -or $configRelative.StartsWith('../')) {
+        throw 'Framework views require docfx-config inside the checked-out workspace.'
     }
 }
 
@@ -116,10 +109,8 @@ $locationPushed = $false
 $contextPath = $docfxRoot
 try {
     New-Item -ItemType Directory -Force -Path $temporaryRoot | Out-Null
-    if ($FrameworkViews) {
-        $frameworkSettings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json -AsHashtable -NoEnumerate
-        $builderImage = if ($frameworkSettings.builderImage) { $frameworkSettings.builderImage } else { 'codebeltnet/docfx:2' }
-        $pullPolicy = if ($frameworkSettings.builderImage) { 'missing' } else { 'always' }
+    if ($frameworkViewsEnabled) {
+        $builderImage = 'codebeltnet/docfx:2'
         Write-Host "Using DocFX framework-view builder image '$builderImage'."
         $containerCommand = @'
 $ErrorActionPreference = 'Stop'
@@ -128,18 +119,11 @@ New-Item -ItemType Directory -Path /tmp/workspace | Out-Null
 & /bin/cp -R /docfx-source/. /tmp/workspace
 Set-Location /tmp/workspace
 
-# The selected image is already running. Use its CLI and template directly.
-$settings = Get-Content -LiteralPath $env:DOCFX_SETTINGS -Raw | ConvertFrom-Json -AsHashtable -NoEnumerate
-if ($settings.Contains('builderImage')) {
-    $settings.Remove('builderImage')
-    ConvertTo-Json -InputObject $settings -Depth 100 | Set-Content -LiteralPath $env:DOCFX_SETTINGS
-}
-& /opt/docfx/framework-views/Build-DocfxFrameworkViews.ps1 -DocfxConfig $env:DOCFX_CONFIG `
-    -SettingsPath $env:DOCFX_SETTINGS -OutputRoot /tmp/docfx-output
+& /opt/docfx/framework-views/Build-DocfxFrameworkViews.ps1 -DocfxConfig $env:DOCFX_CONFIG -OutputRoot /tmp/docfx-output
 exit $LASTEXITCODE
 '@
-        $engineContainer = & docker create --pull $pullPolicy --mount "type=bind,source=$workspaceRoot,target=/docfx-source,readonly" `
-            --env "DOCFX_CONFIG=$configRelative" --env "DOCFX_SETTINGS=$settingsRelative" --entrypoint pwsh `
+        $engineContainer = & docker create --pull always --mount "type=bind,source=$workspaceRoot,target=/docfx-source,readonly" `
+            --env "DOCFX_CONFIG=$configRelative" --entrypoint pwsh `
             -- $builderImage -NoProfile -NonInteractive -Command $containerCommand
         if ($LASTEXITCODE -ne 0) {
             throw "Could not create a container from DocFX builder image '$builderImage'. Check the image reference and registry access."
@@ -202,7 +186,7 @@ exit $LASTEXITCODE
         '--annotation', "index:org.opencontainers.image.version=$Version"
         '--annotation', "index:org.opencontainers.image.revision=$Revision"
         '--output', $outputSpec
-        if ($FrameworkViews -and !$bundledPackaging) { '--build-context'; "docfx-source=$docfxRoot" }
+        if ($frameworkViewsEnabled -and !$bundledPackaging) { '--build-context'; "docfx-source=$docfxRoot" }
         $contextPath
     )
     & docker buildx @buildArguments
