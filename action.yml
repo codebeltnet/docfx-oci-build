@@ -15,10 +15,10 @@ inputs:
     required: false
     default: .docfx/docfx.json
   dockerfile:
-    description: Workspace-relative Dockerfile, or bundled-framework-views to opt into the standard framework-view image. Defaults to .docfx/Dockerfile.docfx for legacy builds.
+    description: Workspace-relative Dockerfile, or bundled-framework-views to use standard packaging from the DocFX builder image. Defaults to .docfx/Dockerfile.docfx for legacy builds.
     required: false
   docfx-version:
-    description: DocFX CLI version used to generate metadata.
+    description: DocFX CLI version for legacy metadata. Framework-view builds use the CLI in the builder image.
     required: false
     default: 2.81.0
   framework-views:
@@ -80,7 +80,7 @@ runs:
         }
 
     - id: build
-      name: Generate DocFX metadata and build the OCI image archive
+      name: Build documentation and export the OCI image archive
       shell: pwsh
       env:
         ACTION_PATH: ${{ github.action_path }}
