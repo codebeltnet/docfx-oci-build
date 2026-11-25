@@ -31,6 +31,9 @@ $frameworkViewsEnabled = $false
 if (![bool]::TryParse($FrameworkViews, [ref] $frameworkViewsEnabled)) {
     throw "Set framework-views to 'true' or 'false'."
 }
+if (-not $env:GITHUB_OUTPUT) {
+    throw 'GITHUB_OUTPUT is not available; this build script must run from a GitHub Action.'
+}
 
 $semverPattern = '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?$'
 if ($Version -notmatch $semverPattern) {
@@ -92,6 +95,10 @@ New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
 if (Test-Path -LiteralPath $outputPath) {
     throw "OCI archive output already exists; choose a fresh output path: $outputPath"
 }
+$checksumPath = "$outputPath.sha256"
+if (Test-Path -LiteralPath $checksumPath) {
+    throw "OCI checksum output already exists; choose a fresh output path: $checksumPath"
+}
 
 $platformList = @($Platforms.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 if (-not ($platformList -contains 'linux/amd64') -or -not ($platformList -contains 'linux/arm64')) {
@@ -101,8 +108,10 @@ if (-not ($platformList -contains 'linux/amd64') -or -not ($platformList -contai
 $apiRoot = Join-Path $docfxRoot 'api'
 $temporaryRoot = Join-Path $runnerTemp "docfx-oci-$([guid]::NewGuid().ToString('N'))"
 $originalPath = $env:PATH
-$builderName = "docfx-oci-$PID"
+$builderName = Split-Path -Leaf $temporaryRoot
 $builderCreated = $false
+$exportStarted = $false
+$exportCompleted = $false
 $engineContainer = $null
 $legacyMetadataStarted = $false
 $locationPushed = $false
@@ -110,7 +119,7 @@ $contextPath = $docfxRoot
 try {
     New-Item -ItemType Directory -Force -Path $temporaryRoot | Out-Null
     if ($frameworkViewsEnabled) {
-        $builderImage = 'codebeltnet/docfx:2'
+        $builderImage = 'codebeltnet/docfx:2.81.0-v1.1.0'
         Write-Host "Using DocFX framework-view builder image '$builderImage'."
         $containerCommand = @'
 $ErrorActionPreference = 'Stop'
@@ -126,7 +135,7 @@ exit $LASTEXITCODE
             --env "DOCFX_CONFIG=$configRelative" --entrypoint pwsh `
             -- $builderImage -NoProfile -NonInteractive -Command $containerCommand
         if ($LASTEXITCODE -ne 0) {
-            throw "Could not create a container from DocFX builder image '$builderImage'. Check the image reference and registry access."
+            throw "Could not create a container from DocFX builder image '$builderImage'. Confirm the upstream release has published this tag and the runner can pull it from Docker Hub."
         }
         & docker start --attach $engineContainer
         if ($LASTEXITCODE -ne 0) {
@@ -166,7 +175,7 @@ exit $LASTEXITCODE
     if ($LASTEXITCODE -ne 0) {
         throw 'Docker Buildx is not available.'
     }
-    & docker buildx create --name $builderName --driver docker-container --use
+    & docker buildx create --name $builderName --driver docker-container
     if ($LASTEXITCODE -ne 0) {
         throw 'Could not create a Docker Buildx builder for the OCI export.'
     }
@@ -189,11 +198,22 @@ exit $LASTEXITCODE
         if ($frameworkViewsEnabled -and !$bundledPackaging) { '--build-context'; "docfx-source=$docfxRoot" }
         $contextPath
     )
+    $exportStarted = $true
     & docker buildx @buildArguments
     if ($LASTEXITCODE -ne 0) {
-        throw "Docker Buildx failed to create the DocFX OCI artifact with exit code $LASTEXITCODE."
+        throw "Docker Buildx failed to create the DocFX OCI artifact with exit code $LASTEXITCODE. For registry authorization errors, authenticate with docker login before invoking the action (docker login dhi.io for the bundled Dockerfile). Buildx uses the caller's Docker configuration and credential helpers."
     }
+    if (-not (Test-Path -LiteralPath $outputPath -PathType Leaf)) {
+        throw "Docker Buildx completed without creating the expected OCI archive: $outputPath"
+    }
+    $archiveHash = (Get-FileHash -LiteralPath $outputPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $checksumText = "$archiveHash  $([System.IO.Path]::GetFileName($outputPath))$([System.Environment]::NewLine)"
+    [System.IO.File]::WriteAllText($checksumPath, $checksumText, [System.Text.UTF8Encoding]::new($false))
+    $exportCompleted = $true
 } finally {
+    if ($exportStarted -and !$exportCompleted) {
+        Remove-Item -LiteralPath $outputPath, $checksumPath -ErrorAction SilentlyContinue
+    }
     if ($builderCreated) {
         & docker buildx rm $builderName | Out-Null
     }
@@ -211,23 +231,16 @@ exit $LASTEXITCODE
         if ($relative -match '^docfx-oci-[a-f0-9]{32}$') { Remove-Item -LiteralPath $temporary -Recurse -Force }
     }
     if ($legacyMetadataStarted -and (Test-Path -LiteralPath $apiRoot -PathType Container)) {
-        Get-ChildItem -LiteralPath $apiRoot -Recurse -File |
+        Get-ChildItem -LiteralPath $apiRoot -Recurse -File -Force |
             Where-Object { $_.Extension -eq '.yml' -or $_.Name -eq '.manifest' } |
             Remove-Item -Force
     }
 }
 
-if (-not (Test-Path -LiteralPath $outputPath -PathType Leaf)) {
-    throw "Docker Buildx completed without creating the expected OCI archive: $outputPath"
+try {
+    Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value @("archive-path=$outputPath", "checksum-path=$checksumPath") -Encoding utf8
+} catch {
+    Remove-Item -LiteralPath $outputPath, $checksumPath -ErrorAction SilentlyContinue
+    throw
 }
-$checksumPath = "$outputPath.sha256"
-$archiveHash = (Get-FileHash -LiteralPath $outputPath -Algorithm SHA256).Hash.ToLowerInvariant()
-$checksumText = "$archiveHash  $([System.IO.Path]::GetFileName($outputPath))$([System.Environment]::NewLine)"
-[System.IO.File]::WriteAllText($checksumPath, $checksumText, [System.Text.UTF8Encoding]::new($false))
-
-if (-not $env:GITHUB_OUTPUT) {
-    throw 'GITHUB_OUTPUT is not available; this build script must run from a GitHub Action.'
-}
-Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "archive-path=$outputPath" -Encoding utf8
-Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "checksum-path=$checksumPath" -Encoding utf8
-Write-Host "Created OCI archive $outputPath for $Version at $Revision."
+Write-Host "Exported OCI archive $outputPath for $Version at $Revision."
