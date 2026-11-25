@@ -37,8 +37,8 @@ with:
   dockerfile: .docfx/Dockerfile.docfx
   # Legacy CLI selection. Framework views use the builder image's CLI.
   docfx-version: 2.81.0
-  # Optional JSON settings path for native framework views.
-  framework-views:
+  # Boolean opt-in for native framework views.
+  framework-views: false
   # Comma-separated target platform list for the OCI image.
   platforms: linux/amd64,linux/arm64
 ```
@@ -61,7 +61,7 @@ The OCI archive is validated by `codebeltnet/oci-artifact-verify@v1` before its 
 
 ## Framework views
 
-Set `framework-views` to the consumer's existing settings file and choose a Dockerfile explicitly. Keep the settings file and `docfx-config` in the checked-out workspace. Omitting `framework-views` keeps the legacy metadata and Dockerfile flow.
+Set `framework-views: true` and keep `docfx-config` in the checked-out workspace. The generator derives the API root from DocFX metadata destinations and discovers frameworks from MSBuild. Omitting the input or setting it to `false` uses the legacy metadata and Dockerfile flow.
 
 ```yaml
 - uses: codebeltnet/docfx-oci-build@<full-action-release-commit-sha>
@@ -69,20 +69,22 @@ Set `framework-views` to the consumer's existing settings file and choose a Dock
     version: ${{ needs.build.outputs.version }}
     revision: ${{ github.sha }}
     output-path: ${{ runner.temp }}/docfx-site.oci.tar
-    framework-views: .docfx/framework-views.json
-    dockerfile: bundled-framework-views
+    docfx-config: .docfx/docfx.json
+    framework-views: true
 ```
 
-The action pulls `codebeltnet/docfx:2` and runs its generator, CLI and default `ms-style` template. Set `builderImage` in the framework-view settings to use another compatible Docker image reference, such as a published digest or a locally built candidate. The selected image must include the shared engine and the SDKs the consumer projects require. The generator builds from a writable copy inside the container, with the runner's checkout mounted read-only. [DocFX framework-view documentation](https://github.com/codebeltnet/docfx/tree/main/framework-views)
+The action pulls `codebeltnet/docfx:2` and runs its generator, CLI and default `ms-style` template. The published builder image must include the generator that uses DocFX and MSBuild conventions and the SDKs required by the consumer projects. The generator builds from a writable copy inside the container, with the runner's checkout mounted read-only. [DocFX framework-view documentation](https://github.com/codebeltnet/docfx/tree/main/framework-views)
 
 ### Choose the OCI packaging
 
 The framework engine supplies `site/` and `nginx.conf` as the primary Buildx context.
 
-- Set `dockerfile: bundled-framework-views` to use the standard Dockerfile from the same builder image. It checks the framework manifest and runs `nginx -t`.
+- Omit `dockerfile` to use the standard Dockerfile from the same builder image. It checks the framework manifest and runs `nginx -t`.
 - Set `dockerfile` to a compatible workspace-relative file to keep consumer-owned packaging and verification. Use `COPY site/ ...` for the rendered files. Install `nginx.conf` or retain its routing and cache behavior in your own configuration. The named `docfx-source` Buildx context points to the directory containing `docfx.json`. Use `COPY --from=docfx-source ...` for consumer configuration, verification scripts and verification inputs.
 
 Both options validate the checked-out release revision, export `linux/amd64` and `linux/arm64`, annotate the OCI index with the release version and revision, and write and verify a detached SHA-256 checksum.
+
+Existing framework-view workflows should replace the settings-file input with `framework-views: true` and remove the bundled Dockerfile selector. Keep a custom Dockerfile path where required.
 
 ## Examples
 
