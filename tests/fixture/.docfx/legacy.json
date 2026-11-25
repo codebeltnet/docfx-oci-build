@@ -1,0 +1,14 @@
+{
+  "metadata": [
+    {
+      "src": [{ "src": "../src", "files": ["Fixture.csproj"] }],
+      "properties": { "TargetFramework": "net10.0" },
+      "dest": "api"
+    }
+  ],
+  "build": {
+    "content": [{ "files": ["index.md", "toc.yml", "api/**/*.yml"] }],
+    "template": ["default", "modern"],
+    "dest": "_site"
+  }
+}

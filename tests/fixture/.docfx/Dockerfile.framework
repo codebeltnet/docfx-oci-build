@@ -1,0 +1,10 @@
+FROM --platform=$BUILDPLATFORM ghcr.io/nginx/nginx-unprivileged:1.31-alpine AS verify
+COPY site/ /site/
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=docfx-source index.md /authored-index.md
+RUN test -s /site/framework-views.json && test -s /authored-index.md && nginx -t
+
+FROM ghcr.io/nginx/nginx-unprivileged:1.31-alpine
+LABEL net.codebelt.docfx.fixture.packaging="consumer"
+COPY --from=verify /site/ /usr/share/nginx/html/
+COPY --from=verify /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default.conf

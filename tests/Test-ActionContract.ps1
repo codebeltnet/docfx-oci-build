@@ -39,9 +39,10 @@ foreach ($inputName in 'version', 'revision', 'output-path', 'docfx-config', 'do
   Assert-Contains -Text $actionText -Expected ('${{ inputs.' + $inputName + ' }}') -Message "The action must consume its '$inputName' input."
 }
 
-Assert-Contains -Text $actionText -Expected 'value: ${{ steps.build.outputs.archive-path }}' -Message 'The action must expose the archive path.'
-Assert-Contains -Text $actionText -Expected 'value: ${{ steps.build.outputs.checksum-path }}' -Message 'The action must expose the detached checksum path.'
-Assert-Contains -Text $actionText -Expected 'value: ${{ steps.verify.outputs.digest }}' -Message 'The action must expose the verified OCI index digest.'
+$outputCondition = 'value: ${{ steps.verify.outcome == ''success'' && steps.verify.outputs.digest'
+Assert-Contains $actionText "$outputCondition && steps.build.outputs.archive-path || '' }}" 'The archive output must depend on verification.'
+Assert-Contains $actionText "$outputCondition && steps.build.outputs.checksum-path || '' }}" 'The checksum output must depend on verification.'
+Assert-Contains $actionText "$outputCondition || '' }}" 'The digest output must depend on verification.'
 Assert-Contains -Text $actionText -Expected 'archive-path: ${{ steps.build.outputs.archive-path }}' -Message 'Verification must use the archive produced by the build.'
 Assert-Contains -Text $actionText -Expected 'checksum-path: ${{ steps.build.outputs.checksum-path }}' -Message 'Verification must use the checksum produced by the build.'
 Assert-DoesNotContain -Text $actionText -Unexpected 'docfx-engine-revision' -Message 'The action must use the conventional builder image.'
@@ -66,15 +67,6 @@ function Assert-BuildFailure($Expected) {
   if (Test-Path -LiteralPath $arguments.OutputPath) { throw 'Validation failure produced an OCI archive.' }
 }
 
-Assert-BuildFailure 'DocFX Dockerfile was not found'
-$arguments.FrameworkViews = 'false'
-Assert-BuildFailure 'DocFX Dockerfile was not found'
-$arguments.FrameworkViews = 'invalid'
-Assert-BuildFailure "Set framework-views to 'true' or 'false'."
-$arguments.FrameworkViews = 'true'
-$arguments.Dockerfile = 'missing.Dockerfile'
-Assert-BuildFailure 'DocFX Dockerfile was not found'
-
 # Capture the packaging commands without contacting a registry or running Buildx.
 $calls = [Collections.Generic.List[object]]::new()
 function docker {
@@ -87,8 +79,17 @@ function docker {
 }
 
 $previousGithubOutput = $env:GITHUB_OUTPUT
+$env:GITHUB_OUTPUT = [IO.Path]::GetTempFileName()
 try {
-  $env:GITHUB_OUTPUT = "$($arguments.OutputPath).outputs"
+  Assert-BuildFailure 'DocFX Dockerfile was not found'
+  $arguments.FrameworkViews = 'false'
+  Assert-BuildFailure 'DocFX Dockerfile was not found'
+  $arguments.FrameworkViews = 'invalid'
+  Assert-BuildFailure "Set framework-views to 'true' or 'false'."
+  $arguments.FrameworkViews = 'true'
+  $arguments.Dockerfile = 'missing.Dockerfile'
+  Assert-BuildFailure 'DocFX Dockerfile was not found'
+
   foreach ($custom in $false, $true) {
     $calls.Clear()
     $arguments.OutputPath = (Join-Path ([IO.Path]::GetTempPath()) "docfx-oci-contract-$([guid]::NewGuid().ToString('N')).tar")
@@ -96,6 +97,8 @@ try {
     try {
       & $build @arguments
       $create = $calls | Where-Object { $_[0] -eq 'create' } | ForEach-Object { $_ -join ' ' }
+      Assert-Contains $create '--pull always' 'Production must pull the approved builder tag.'
+      Assert-Contains $create 'codebeltnet/docfx:2.81.0-v1.1.0 ' 'Framework generation must use the approved builder.'
       Assert-Contains $create '/opt/docfx/framework-views/Build-DocfxFrameworkViews.ps1 -DocfxConfig $env:DOCFX_CONFIG -OutputRoot /tmp/docfx-output' 'Framework generation must delegate to the bundled entry point.'
       Assert-DoesNotContain $create 'DOCFX_SETTINGS' 'Framework generation must use only the DocFX configuration.'
       $copies = ($calls | Where-Object { $_[0] -eq 'cp' } | ForEach-Object { $_[1] }) -join ' '

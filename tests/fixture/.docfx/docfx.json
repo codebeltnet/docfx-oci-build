@@ -1,0 +1,13 @@
+{
+  "metadata": [
+    {
+      "src": [{ "src": "../src", "files": ["Fixture.csproj"] }],
+      "dest": "api/dotnet"
+    }
+  ],
+  "build": {
+    "content": [{ "files": ["index.md", "toc.yml", "api/**/*.yml"] }],
+    "template": ["default", "modern", "templates/ms-style"],
+    "dest": "_site"
+  }
+}
