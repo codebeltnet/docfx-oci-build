@@ -44,7 +44,7 @@ Assert-Contains -Text $actionText -Expected 'value: ${{ steps.build.outputs.chec
 Assert-Contains -Text $actionText -Expected 'value: ${{ steps.verify.outputs.digest }}' -Message 'The action must expose the verified OCI index digest.'
 Assert-Contains -Text $actionText -Expected 'archive-path: ${{ steps.build.outputs.archive-path }}' -Message 'Verification must use the archive produced by the build.'
 Assert-Contains -Text $actionText -Expected 'checksum-path: ${{ steps.build.outputs.checksum-path }}' -Message 'Verification must use the checksum produced by the build.'
-Assert-DoesNotContain -Text $actionText -Unexpected 'docfx-engine-revision' -Message 'The builder image must be selected through the existing framework-view settings.'
+Assert-DoesNotContain -Text $actionText -Unexpected 'docfx-engine-revision' -Message 'The action must use the conventional builder image.'
 Assert-Contains -Text $readmeText -Expected 'install the .NET 10 SDK or newer' -Message 'The README must document the explicit SDK prerequisite.'
 Assert-Contains -Text $readmeText -Expected 'fails immediately with an explicit diagnostic' -Message 'The README must describe the fail-fast prerequisite behavior.'
 
@@ -56,20 +56,69 @@ $arguments = @{
   OutputPath = (Join-Path ([IO.Path]::GetTempPath()) "docfx-oci-contract-$([guid]::NewGuid().ToString('N')).tar")
   WorkspaceRoot = $actionRoot
   DocfxConfig = 'action.yml'
-  FrameworkViews = 'missing-framework-views.json'
   Platforms = 'linux/amd64,linux/arm64'
-  Dockerfile = 'bundled-framework-views'
 }
 
-$failure = $null
-try {
-  & $build @arguments
-} catch {
-  $failure = $_.Exception.Message
+function Assert-BuildFailure($Expected) {
+  $failure = ''
+  try { & $build @arguments } catch { $failure = $_.Exception.Message }
+  Assert-Contains -Text $failure -Expected $Expected -Message 'Unexpected action validation result.'
+  if (Test-Path -LiteralPath $arguments.OutputPath) { throw 'Validation failure produced an OCI archive.' }
 }
-Assert-Contains -Text $failure -Expected 'Framework views settings were not found' -Message 'The build must diagnose missing framework-view settings.'
-if (Test-Path -LiteralPath $arguments.OutputPath) {
-  throw 'Missing framework-view settings produced an OCI archive.'
+
+Assert-BuildFailure 'DocFX Dockerfile was not found'
+$arguments.FrameworkViews = 'false'
+Assert-BuildFailure 'DocFX Dockerfile was not found'
+$arguments.FrameworkViews = 'invalid'
+Assert-BuildFailure "Set framework-views to 'true' or 'false'."
+$arguments.FrameworkViews = 'true'
+$arguments.Dockerfile = 'missing.Dockerfile'
+Assert-BuildFailure 'DocFX Dockerfile was not found'
+
+# Capture the packaging commands without contacting a registry or running Buildx.
+$calls = [Collections.Generic.List[object]]::new()
+function docker {
+  $calls.Add(@($args))
+  $global:LASTEXITCODE = 0
+  if ($args[0] -eq 'create') { return 'test-container' }
+  if ($args[0] -eq 'buildx' -and $args[1] -eq 'build') {
+    Set-Content -LiteralPath $arguments.OutputPath -Value 'test OCI output'
+  }
+}
+
+$previousGithubOutput = $env:GITHUB_OUTPUT
+try {
+  $env:GITHUB_OUTPUT = "$($arguments.OutputPath).outputs"
+  foreach ($custom in $false, $true) {
+    $calls.Clear()
+    $arguments.OutputPath = (Join-Path ([IO.Path]::GetTempPath()) "docfx-oci-contract-$([guid]::NewGuid().ToString('N')).tar")
+    if ($custom) { $arguments.Dockerfile = 'action.yml' } else { $arguments.Remove('Dockerfile') }
+    try {
+      & $build @arguments
+      $create = $calls | Where-Object { $_[0] -eq 'create' } | ForEach-Object { $_ -join ' ' }
+      Assert-Contains $create '/opt/docfx/framework-views/Build-DocfxFrameworkViews.ps1 -DocfxConfig $env:DOCFX_CONFIG -OutputRoot /tmp/docfx-output' 'Framework generation must delegate to the bundled entry point.'
+      Assert-DoesNotContain $create 'DOCFX_SETTINGS' 'Framework generation must use only the DocFX configuration.'
+      $copies = ($calls | Where-Object { $_[0] -eq 'cp' } | ForEach-Object { $_[1] }) -join ' '
+      Assert-Contains $copies 'test-container:/tmp/docfx-output/site' 'Packaging must use the generated site.'
+      Assert-Contains $copies 'test-container:/tmp/docfx-output/nginx.conf' 'Packaging must use the generated routing.'
+      $export = $calls | Where-Object { $_[0] -eq 'buildx' -and $_[1] -eq 'build' } | ForEach-Object { $_ -join ' ' }
+      if ($custom) {
+        Assert-DoesNotContain $copies 'framework-views.Dockerfile' 'Explicit packaging must use the consumer Dockerfile.'
+        Assert-Contains $export "--file $(Join-Path $actionRoot 'action.yml')" 'The requested Dockerfile must be passed to Buildx.'
+        Assert-Contains $export '--build-context docfx-source=' 'Custom packaging must receive the authored DocFX inputs.'
+      } else {
+        Assert-Contains $copies 'test-container:/opt/docfx/framework-views/framework-views.Dockerfile' 'Bundled packaging must be selected by default.'
+        Assert-Contains $export 'framework-views.Dockerfile' 'Buildx must use the bundled Dockerfile.'
+        Assert-DoesNotContain $export 'docfx-source=' 'Bundled packaging needs only generated output.'
+      }
+      if (!(Test-Path -LiteralPath "$($arguments.OutputPath).sha256" -PathType Leaf)) { throw 'The archive checksum was not written.' }
+    } finally {
+      Remove-Item -LiteralPath $arguments.OutputPath, "$($arguments.OutputPath).sha256" -ErrorAction SilentlyContinue
+    }
+  }
+} finally {
+  Remove-Item -LiteralPath $env:GITHUB_OUTPUT -ErrorAction SilentlyContinue
+  $env:GITHUB_OUTPUT = $previousGithubOutput
 }
 
 Write-Host 'DocFX OCI build action contract passed.'
