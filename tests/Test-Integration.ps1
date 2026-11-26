@@ -9,7 +9,6 @@ param(
     [string]$OutputPath,
 
     [string]$ConsumerRoot,
-    [string]$LocalBuilder,
     [string]$VerifierPath
 )
 
@@ -28,20 +27,14 @@ $expectedFailure = @{
     ExportFailure = 'Docker Buildx failed to create the DocFX OCI artifact'
 }[$Scenario]
 
-# Invoke real Docker. Keep local candidate selection, the public test base, and injected faults here.
+# Invoke real Docker. Keep the public test base and injected faults here.
 function docker {
     $arguments = @($args)
     if ($arguments[0] -eq 'create') {
-        $imageIndex = [Array]::IndexOf($arguments, 'pwsh') + 1
-        if ($arguments[$imageIndex] -eq '--') { $imageIndex++ }
-        if ($arguments[$imageIndex] -cnotmatch '^codebeltnet/docfx:\d+\.\d+\.\d+-v\d+\.\d+\.\d+$') {
-            throw 'Expected an engine-qualified Codebelt builder image.'
-        }
         if ($Scenario -eq 'UnavailableBuilder') {
+            $imageIndex = [Array]::IndexOf($arguments, 'pwsh') + 1
+            if ($arguments[$imageIndex] -eq '--') { $imageIndex++ }
             $arguments[$imageIndex] = "docfx-missing:$([guid]::NewGuid().ToString('N'))"
-            $arguments[2] = 'never'
-        } elseif ($LocalBuilder) {
-            $arguments[$imageIndex] = $LocalBuilder
             $arguments[2] = 'never'
         }
         $tracked.Container = & $nativeDocker @arguments

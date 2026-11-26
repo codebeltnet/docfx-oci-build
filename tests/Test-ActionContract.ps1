@@ -98,7 +98,7 @@ try {
       & $build @arguments
       $create = $calls | Where-Object { $_[0] -eq 'create' } | ForEach-Object { $_ -join ' ' }
       Assert-Contains $create '--pull always' 'Production must pull the approved builder tag.'
-      Assert-Contains $create 'codebeltnet/docfx:2.81.0-v1.1.0 ' 'Framework generation must use the approved builder.'
+      Assert-Contains $create 'codebeltnet/docfx:2 ' 'Framework generation must use the stable Codebelt builder tag.'
       Assert-Contains $create '/opt/docfx/framework-views/Build-DocfxFrameworkViews.ps1 -DocfxConfig $env:DOCFX_CONFIG -OutputRoot /tmp/docfx-output' 'Framework generation must delegate to the bundled entry point.'
       Assert-DoesNotContain $create 'DOCFX_SETTINGS' 'Framework generation must use only the DocFX configuration.'
       $copies = ($calls | Where-Object { $_[0] -eq 'cp' } | ForEach-Object { $_[1] }) -join ' '

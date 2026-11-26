@@ -73,7 +73,7 @@ Describe 'DocFX OCI action orchestration' {
         Remove-Item Env:RUNNER_TEMP
         & $buildScript @parameters
         $calls = $state.Calls -join "`n"
-        $calls | Should -Match 'create --pull always .*target=/docfx-source,readonly.* codebeltnet/docfx:2\.81\.0-v1\.1\.0 '
+        $calls | Should -Match 'create --pull always .*target=/docfx-source,readonly.* codebeltnet/docfx:2 '
         $calls | Should -Match 'cp test-container:/opt/docfx/framework-views/framework-views.Dockerfile'
         $calls | Should -Match '--platform linux/amd64,linux/arm64'
         $calls | Should -Match "--annotation index:org.opencontainers.image.version=8\.4\.3-rc\.1 --annotation index:org.opencontainers.image.revision=$revision"
