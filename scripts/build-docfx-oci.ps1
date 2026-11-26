@@ -119,7 +119,7 @@ $contextPath = $docfxRoot
 try {
     New-Item -ItemType Directory -Force -Path $temporaryRoot | Out-Null
     if ($frameworkViewsEnabled) {
-        $builderImage = 'codebeltnet/docfx:2.81.0-v1.1.0'
+        $builderImage = 'codebeltnet/docfx:2'
         Write-Host "Using DocFX framework-view builder image '$builderImage'."
         $containerCommand = @'
 $ErrorActionPreference = 'Stop'
