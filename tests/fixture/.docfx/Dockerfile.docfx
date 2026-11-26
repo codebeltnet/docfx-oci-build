@@ -1,0 +1,8 @@
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0-alpine AS build
+RUN dotnet tool install --tool-path /tools docfx --version 2.81.0
+WORKDIR /docs
+COPY . .
+RUN /tools/docfx build legacy.json && test -s _site/index.html && test -s _site/api/Codebelt.DocfxFixture.Example.html
+
+FROM ghcr.io/nginx/nginx-unprivileged:1.31-alpine
+COPY --from=build /docs/_site/ /usr/share/nginx/html/

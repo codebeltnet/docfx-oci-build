@@ -1,6 +1,6 @@
 # Build DocFX OCI Artifact from Codebelt
 
-Generates DocFX metadata and exports the site as a multi-platform OCI archive from the checked out revision. The action verifies that the workspace is at the requested release SHA and uses the explicit release version as the OCI reference and version annotation.
+Builds documentation from the checked-out revision and exports the site as a verified multi-platform OCI archive. The action verifies that the workspace is at the requested release SHA and uses the explicit release version as the OCI reference and version annotation.
 
 > This action is part of the Codebelt umbrella and ensures a consistent way of:
 >
@@ -35,10 +35,10 @@ with:
   docfx-config: .docfx/docfx.json
   # Workspace-relative Dockerfile. This default applies to builds without framework views.
   dockerfile: .docfx/Dockerfile.docfx
-  # DocFX CLI version used to generate metadata.
+  # Legacy CLI selection. Framework views use the builder image's CLI.
   docfx-version: 2.81.0
-  # Optional JSON settings path for native framework views.
-  framework-views:
+  # Boolean opt-in for native framework views.
+  framework-views: false
   # Comma-separated target platform list for the OCI image.
   platforms: linux/amd64,linux/arm64
 ```
@@ -55,70 +55,37 @@ outputs:
   digest:
 ```
 
-The caller must check out the requested source SHA, install the .NET 10 SDK or newer, and provide any signing key required by the repository's source projects. The action fails immediately with an explicit diagnostic when the SDK is missing. PowerShell 7 and a Docker Engine with Buildx and Linux-container support must be available; Windows hosts must use Linux container mode. The metadata step preserves the repository's optimized restore decision: it uses `--noRestore` only when restore assets exist and are newer than every project and restore input used by the metadata projects.
+The caller must check out the requested source SHA, install the .NET 10 SDK or newer, and provide any signing key required by the repository's source projects. The action fails immediately with an explicit diagnostic when the SDK is missing. The runner needs PowerShell 7, Docker Engine and Buildx with Linux-container support. Legacy builds install the CLI selected by `docfx-version` on the runner and run standard `docfx metadata` with DocFX and MSBuild managing restores. They retain access to the runner's NuGet configuration and credential providers.
 
-The OCI archive is validated by `codebeltnet/oci-artifact-verify@v1` before its outputs are exposed. The caller persists it as a workflow artifact and a durable release asset; this action does not publish it.
+The OCI archive is validated by `codebeltnet/oci-artifact-verify@v1` before the action returns any outputs. Use a fresh output path for each build. Persist and promote that same verified documentation archive and detached checksum in your release workflow.
 
 ## Framework views
 
-Set `framework-views` to a settings file in the consumer checkout and choose a Dockerfile explicitly. The usual `docfx-config` remains authoritative for project mappings and metadata destinations. Omit `framework-views` to use the existing metadata and Dockerfile flow.
-
-```json
-{
-  "apiPath": "api",
-  "defaultFramework": "net11.0",
-  "builderImage": "codebeltnet/docfx:<version>@sha256:<digest>"
-}
-```
-
-`apiPath` is the shared URL root. For example, `api` covers `api/dotnet`, `api/extensions/dotnet`, `api/aspnet`, and `api/extensions/aspnet` without changing their `metadata.dest` values. Include `ms-style` in `build.template`. MSBuild supplies the declared TFMs, and each project contributes only to its declared targets. The selector starts with the default framework followed by the other declared targets in discovery order. Set the optional `frameworks` array to control the supported views and their fallback order. Resolve duplicate DocFX UIDs between metadata groups as you would for a standard DocFX build.
-
-View IDs support unqualified `net`, `netstandard`, and `netcoreapp` TFMs with dotted versions and compact .NET Framework TFMs such as `net48`. If a project also targets a platform-qualified TFM, list the supported frameworks explicitly.
-
-Use a digest-pinned, framework-aware `codebeltnet/docfx` image for `builderImage`. It supplies the `ms-style` template and renders the site. To render on the host, replace `builderImage` with `"templatePath": "../.docfx-deps/ms-style"` and extract `templates/ms-style` from a separately pinned [`codebeltnet/docfx` source archive](https://github.com/codebeltnet/docfx). The template path is relative to the settings file, and can also be used with a builder image to test an unreleased template. The host uses DocFX **2.81.0** for project discovery and metadata. This version pins the public DocFX file-mapping API used by the resolver. Install the SDKs required by the source projects. The resolver selects .NET 10 or later independently of any consumer `global.json`.
-
-Keep build content and resources under the DocFX configuration directory so they can be copied and rendered in isolation. Keep any site-local xref map out of `build.xref` when it could resolve a UID from a different view. Mixed target graphs with a common assembly version can opt into `alignAssemblyVersion` when DocFX needs it to match the identities of compatible dependencies. An independently versioned graph should use native MSBuild/DocFX resolution.
-
-### Use the same release locally and in CI
-
-Pin the full commit SHA of a release that includes framework views. GitHub distributes the release's source as a ZIP. The composite action uses the scripts already included at that SHA, and a standalone consumer can extract those same files wherever it keeps build tools. The commit pins the extracted files even if GitHub regenerates the ZIP. Cross-repository integration tests can use unpublished checkouts of the same files. [GitHub source archive guarantees](https://docs.github.com/en/repositories/working-with-files/using-files/downloading-source-code-archives#stability-of-source-code-archives)
+Set `framework-views: true` and keep `docfx-config` in the checked-out workspace. The generator derives the API root from DocFX metadata destinations and discovers frameworks from MSBuild. Omitting the input or setting it to `false` uses the legacy metadata and Dockerfile flow.
 
 ```yaml
-- uses: codebeltnet/docfx-oci-build@<full-release-commit-sha>
+- uses: codebeltnet/docfx-oci-build@v1
   with:
-    version: ${{ needs.build.outputs.version }}
-    revision: ${{ github.sha }}
-    output-path: ${{ runner.temp }}/docfx-site.oci.tar
-    framework-views: .docfx/framework-views.json
-    dockerfile: bundled-framework-views
+    version: ${{ needs.release_preflight.outputs.version }}
+    revision: ${{ needs.release_preflight.outputs.sha }}
+    output-path: ${{ runner.temp }}/docfx.oci.tar
+    framework-views: true
 ```
 
-From the consumer root, use PowerShell 7 and the same settings file. Use Docker when rendering with `builderImage`.
+Framework views use the stable major-version tag `codebeltnet/docfx:2`. The action logs the tag and uses `--pull always` to pick up compatible upstream releases as Codebelt promotes them. The `docfx-version` input selects the CLI for legacy builds only. The OCI archive contains the consumer's generated documentation and carries the consumer's release version and source revision. See [builder validation](RELEASE.md#builder-validation).
 
-```powershell
-$releaseCommit = '<full-release-commit-sha>'
-$tools = Join-Path ([IO.Path]::GetTempPath()) "docfx-views-$([guid]::NewGuid().ToString('N'))"
-New-Item -ItemType Directory -Path $tools | Out-Null
-Invoke-WebRequest "https://codeload.github.com/codebeltnet/docfx-oci-build/zip/$releaseCommit" -OutFile "$tools/source.zip"
-Expand-Archive -LiteralPath "$tools/source.zip" -DestinationPath $tools
-dotnet tool install --tool-path "$tools/bin" docfx --version 2.81.0
-if ($LASTEXITCODE -ne 0) { throw 'Could not install DocFX 2.81.0.' }
-$env:PATH = "$tools/bin$([IO.Path]::PathSeparator)$env:PATH"
-& "$tools/docfx-oci-build-$releaseCommit/scripts/Build-DocfxFrameworkViews.ps1" `
-    -DocfxConfig .docfx/docfx.json -SettingsPath .docfx/framework-views.json `
-    -OutputRoot "$tools/output"
-```
-
-Local callers can pass `-MetadataCache` with `-MetadataCacheKey`. Include the source tree, imported build files, filters, restore inputs, and Git revision in the caller's fingerprint. The generator also hashes the shared metadata implementation, DocFX configuration, resolved file mappings, resolver and project SDK versions, DocFX version, and framework settings that affect metadata. Each view's cached output is checked before reuse.
+The builder reads `.docfx/docfx.json` by default and uses MSBuild to discover the target frameworks. The checkout is mounted read-only and copied inside the container, including Git metadata, signing keys in the checkout, MSBuild imports, project references, templates and content. The builder must contain the SDKs required by the projects and any `global.json` constraints. Runner NuGet credentials, external credential providers, the runner's home directory, and files outside the checkout are unavailable inside the isolated builder. Framework-view consumers need restore sources accessible from the builder. [DocFX framework-view documentation](https://github.com/codebeltnet/docfx/tree/main/framework-views)
 
 ### Choose the OCI packaging
 
-The framework generator outputs the staged `site/` and generated `nginx.conf`. When the action packages the site, its primary build context contains those two paths.
+The framework engine supplies `site/` and `nginx.conf` as the primary Buildx context.
 
-- Set `dockerfile: bundled-framework-views` to adopt the bundled NGINX configuration and image checks. This explicitly replaces the consumer's image, NGINX configuration, and Dockerfile verification. The bundled Dockerfile checks for the framework manifest and runs `nginx -t`.
-- Set `dockerfile` to a compatible workspace-relative file to preserve consumer-specific image behavior and verification. Use `COPY site/ ...` for the rendered files, and install `nginx.conf` or preserve its routing and cache behavior in your own configuration. The action supplies the directory containing `docfx.json` as the named Buildx context `docfx-source`. Use `COPY --from=docfx-source ...` for consumer-owned configuration, verification scripts, and verification inputs. Validate the staged site and the final server configuration in the Dockerfile. A legacy Dockerfile that runs its own single `docfx build` needs to be adapted to consume the staged site.
+- Omit `dockerfile` to use the standard Dockerfile from the same builder image. It uses a digest-pinned Docker Hardened Image from `dhi.io`, checks the generated framework manifest and runs `nginx -t`.
+- Set `dockerfile` to a compatible workspace-relative file to keep consumer-owned packaging and verification. Use `COPY site/ ...` for the rendered files. Install `nginx.conf` or retain its routing and cache behavior in your own configuration. The named `docfx-source` Buildx context points to the directory containing `docfx.json`. Use `COPY --from=docfx-source ...` for consumer configuration, verification scripts and verification inputs.
 
-Both options keep the release revision check, required `linux/amd64` and `linux/arm64` platforms, OCI version and revision annotations, detached SHA-256 checksum, and archive verification. The generated NGINX configuration serves file URLs and slash-terminated directory indexes under the selected view. Requests without a view use the default. An unknown API view returns HTTP 400 and a page or directory index unavailable in the selected view returns HTTP 404. The selector resolves fallback before navigation.
+Both options validate the checked-out release revision, export `linux/amd64` and `linux/arm64`, annotate the OCI index with the release version and revision, and write and verify a detached SHA-256 checksum.
+
+Authenticate to `dhi.io` before this action when the registry requires credentials. Run `docker login dhi.io` or use a registry login action with credentials stored in the caller's repository or environment secrets. Run the login and build with the same Docker configuration and credential helpers. If you set `DOCKER_CONFIG`, make it available to both steps. The local Buildx client uses these credentials for the registry session. For HTTP 401 or 403 errors, check the login host, pull access to the image, and that the credential helper is available on the runner. Custom Dockerfiles may require login to their own base-image registries.
 
 ## Examples
 
@@ -146,13 +113,34 @@ Both options keep the release revision check, required `linux/amd64` and `linux/
     dockerfile: docs/docfx/Dockerfile
 ```
 
-## Contributing to Build DocFX OCI Artifact from Codebelt
+## Validation
 
-Contributions are welcome! Feel free to submit issues, feature requests, or pull requests to help improve this action.
+The PR workflow checks syntax and contracts, enforces 100% measured PowerShell command coverage of the orchestration script, and exports and verifies real two-platform documentation archives. It uses the public GHCR NGINX base through the bundled Dockerfile's existing build argument in test code. The **Required quality gate** combines the workflow, unit and integration jobs. The authenticated production Dockerfile is checked separately with its hardened default.
+
+```powershell
+Install-PSResource Pester -Version 5.7.1 -Repository PSGallery -TrustRepository -Scope CurrentUser
+pwsh -NoProfile -File ./tests/Invoke-UnitTests.ps1
+pwsh -NoProfile -File ./tests/Test-ActionContract.ps1
+actionlint
+```
+
+For local Docker validation, put a clone of `codebeltnet/oci-artifact-verify` alongside this repository and set `$verifier` to the full path of its `verify-oci-artifact.cs`. Check both published builder manifests, then run the integration scenarios against the builder currently published under `codebeltnet/docfx:2`.
+
+```powershell
+$testRoot = [IO.Path]::GetTempPath()
+./tests/Test-PublishedBuilder.ps1
+./tests/Test-Integration.ps1 -Scenario Bundled -OutputPath (Join-Path $testRoot 'docfx-bundled.oci.tar') -VerifierPath $verifier
+./tests/Test-Integration.ps1 -Scenario Custom -OutputPath (Join-Path $testRoot 'docfx-custom.oci.tar') -VerifierPath $verifier
+./tests/Test-Integration.ps1 -Scenario Legacy -OutputPath (Join-Path $testRoot 'docfx-legacy.oci.tar') -VerifierPath $verifier
+docker login dhi.io
+./tests/Test-Integration.ps1 -Scenario Production -OutputPath (Join-Path $testRoot 'docfx-production.oci.tar') -VerifierPath $verifier
+```
+
+Supply `-ConsumerRoot` with a clean, prepared Cuemon checkout to run acceptance with its authored `.docfx/docfx.json`. Use the signing key provisioned for that checkout.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](../LICENSE) file for details.
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
 
 > [!TIP]
 > To learn more about the Codebelt experience and offerings, visit our [organization page](https://github.com/codebeltnet) on GitHub.

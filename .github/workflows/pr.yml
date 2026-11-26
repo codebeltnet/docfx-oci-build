@@ -1,0 +1,138 @@
+name: PR Flow
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  workflow-validation:
+    name: Workflow and action contracts
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: codebeltnet/git-checkout@v1
+        with:
+          ref: ${{ github.sha }}
+      - name: Lint GitHub Actions workflows
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/actionlint.tar.gz"
+          curl -fsSL -o "$archive" https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint"
+      - name: Exercise action inputs, outputs and Docker arguments
+        shell: pwsh
+        run: ./tests/Test-ActionContract.ps1
+
+  unit-tests:
+    name: PowerShell unit coverage (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-26.04, windows-2025]
+    steps:
+      - uses: codebeltnet/git-checkout@v1
+        with:
+          ref: ${{ github.sha }}
+      - name: Install Pester
+        shell: pwsh
+        run: Install-PSResource -Name Pester -Version '5.7.1' -Repository PSGallery -TrustRepository -Scope CurrentUser
+      - name: Require 100% measured PowerShell command coverage
+        shell: pwsh
+        run: ./tests/Invoke-UnitTests.ps1 -CoverageOutputPath "$env:RUNNER_TEMP/docfx-oci-coverage.xml"
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-coverage-${{ matrix.runner }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/docfx-oci-coverage.xml
+          retention-days: 7
+
+  integration:
+    name: Documentation OCI integration
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - uses: codebeltnet/git-checkout@v1
+        with:
+          ref: ${{ github.sha }}
+      - uses: codebeltnet/install-dotnet@v3
+      - name: Verify the published framework-view builder
+        shell: pwsh
+        run: ./tests/Test-PublishedBuilder.ps1
+      - name: Generate and export framework views with bundled packaging
+        id: bundled
+        shell: pwsh
+        run: ./tests/Test-Integration.ps1 -Scenario Bundled -OutputPath "$env:RUNNER_TEMP/framework-bundled.tar"
+      - name: Verify bundled documentation OCI archive
+        uses: codebeltnet/oci-artifact-verify@v1
+        with:
+          archive-path: ${{ steps.bundled.outputs.archive-path }}
+          checksum-path: ${{ steps.bundled.outputs.checksum-path }}
+          version: ${{ steps.bundled.outputs.version }}
+          revision: ${{ steps.bundled.outputs.revision }}
+      - name: Generate and export framework views with consumer packaging
+        id: custom
+        shell: pwsh
+        run: ./tests/Test-Integration.ps1 -Scenario Custom -OutputPath "$env:RUNNER_TEMP/framework-custom.tar"
+      - name: Verify custom documentation OCI archive
+        uses: codebeltnet/oci-artifact-verify@v1
+        with:
+          archive-path: ${{ steps.custom.outputs.archive-path }}
+          checksum-path: ${{ steps.custom.outputs.checksum-path }}
+          version: ${{ steps.custom.outputs.version }}
+          revision: ${{ steps.custom.outputs.revision }}
+      - name: Build and verify ordinary legacy documentation
+        id: legacy
+        uses: ./
+        with:
+          version: 8.4.3-rc.1
+          revision: ${{ github.sha }}
+          output-path: ${{ runner.temp }}/legacy.tar
+          docfx-config: tests/fixture/.docfx/legacy.json
+          dockerfile: tests/fixture/.docfx/Dockerfile.docfx
+      - name: Assert composite action outputs
+        shell: pwsh
+        env:
+          ARCHIVE: ${{ steps.legacy.outputs.archive-path }}
+          CHECKSUM: ${{ steps.legacy.outputs.checksum-path }}
+          DIGEST: ${{ steps.legacy.outputs.digest }}
+        run: |
+          if (!$env:ARCHIVE -or !(Test-Path -LiteralPath $env:ARCHIVE -PathType Leaf) -or
+              $env:CHECKSUM -cne "$env:ARCHIVE.sha256" -or !(Test-Path -LiteralPath $env:CHECKSUM -PathType Leaf) -or
+              $env:DIGEST -cnotmatch '^sha256:[a-f0-9]{64}$') {
+            throw 'The composite action did not return a verified archive, checksum and OCI index digest.'
+          }
+      - name: Exercise Docker failure paths and confirm cleanup
+        shell: pwsh
+        run: |
+          foreach ($scenario in 'UnavailableBuilder', 'GenerationFailure', 'MissingOutput', 'ExportFailure') {
+            ./tests/Test-Integration.ps1 -Scenario $scenario -OutputPath "$env:RUNNER_TEMP/failure-$scenario.tar"
+          }
+
+  quality-gate:
+    name: Required quality gate
+    if: always()
+    needs: [workflow-validation, unit-tests, integration]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Require all PR validation jobs to pass
+        shell: pwsh
+        env:
+          JOB_RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          $results = @($env:JOB_RESULTS | ConvertFrom-Json)
+          if ($results.Count -ne 3 -or @($results | Where-Object { $_ -ne 'success' }).Count -ne 0) {
+            throw "Required PR validation did not pass. Results $env:JOB_RESULTS"
+          }

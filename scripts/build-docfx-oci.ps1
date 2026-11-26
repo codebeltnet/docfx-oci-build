@@ -17,16 +17,23 @@ param(
 
     [string]$Dockerfile,
 
-    [Parameter(Mandatory = $true)]
-    [string]$DocfxVersion,
+    [string]$DocfxVersion = '2.81.0',
 
     [Parameter(Mandatory = $true)]
     [string]$Platforms,
 
-    [string]$FrameworkViews
+    [string]$FrameworkViews = 'false'
 )
 
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $false
+$frameworkViewsEnabled = $false
+if (![bool]::TryParse($FrameworkViews, [ref] $frameworkViewsEnabled)) {
+    throw "Set framework-views to 'true' or 'false'."
+}
+if (-not $env:GITHUB_OUTPUT) {
+    throw 'GITHUB_OUTPUT is not available; this build script must run from a GitHub Action.'
+}
 
 $semverPattern = '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?$'
 if ($Version -notmatch $semverPattern) {
@@ -37,10 +44,11 @@ if ($Revision -notmatch '^[0-9a-fA-F]{40}$') {
 }
 
 $workspaceRoot = [System.IO.Path]::GetFullPath($WorkspaceRoot)
-$actualRevision = (& git -C $workspaceRoot rev-parse HEAD).Trim()
+$actualRevision = & git -C $workspaceRoot rev-parse HEAD
 if ($LASTEXITCODE -ne 0) {
     throw 'Could not resolve the checked out source revision.'
 }
+$actualRevision = $actualRevision.Trim()
 if ($actualRevision -ne $Revision) {
     throw "The workspace is at '$actualRevision', but the requested release revision is '$Revision'."
 }
@@ -50,154 +58,46 @@ $docfxConfigPath = if ([System.IO.Path]::IsPathRooted($DocfxConfig)) {
 } else {
     [System.IO.Path]::GetFullPath((Join-Path $workspaceRoot $DocfxConfig))
 }
-if (!$Dockerfile) {
-    if ($FrameworkViews) {
-        throw "Framework views require an explicit dockerfile input. Use 'bundled-framework-views' to adopt the standard NGINX image and verification, or specify a compatible consumer Dockerfile."
-    }
-    $Dockerfile = '.docfx/Dockerfile.docfx'
-}
-$bundledPackaging = $FrameworkViews -and $Dockerfile -ceq 'bundled-framework-views'
-$dockerfilePath = if ($bundledPackaging) {
-    "$PSScriptRoot/framework-views.Dockerfile"
-} elseif ([System.IO.Path]::IsPathRooted($Dockerfile)) {
+$bundledPackaging = $frameworkViewsEnabled -and !$Dockerfile
+if (!$bundledPackaging -and !$Dockerfile) { $Dockerfile = '.docfx/Dockerfile.docfx' }
+
+$dockerfilePath = if (!$bundledPackaging -and [System.IO.Path]::IsPathRooted($Dockerfile)) {
     [System.IO.Path]::GetFullPath($Dockerfile)
-} else {
+} elseif (!$bundledPackaging) {
     [System.IO.Path]::GetFullPath((Join-Path $workspaceRoot $Dockerfile))
 }
 if (-not (Test-Path -LiteralPath $docfxConfigPath -PathType Leaf)) {
     throw "DocFX configuration was not found: $docfxConfigPath"
 }
-if (-not (Test-Path -LiteralPath $dockerfilePath -PathType Leaf)) {
+if (!$bundledPackaging -and -not (Test-Path -LiteralPath $dockerfilePath -PathType Leaf)) {
     throw "DocFX Dockerfile was not found: $dockerfilePath"
+}
+
+if ($frameworkViewsEnabled) {
+    $configRelative = [IO.Path]::GetRelativePath($workspaceRoot, $docfxConfigPath).Replace('\', '/')
+    if ([IO.Path]::IsPathRooted($configRelative) -or $configRelative -eq '..' -or $configRelative.StartsWith('../')) {
+        throw 'Framework views require docfx-config inside the checked-out workspace.'
+    }
 }
 
 $docfxRoot = Split-Path -Parent $docfxConfigPath
 $docfxConfigName = Split-Path -Leaf $docfxConfigPath
-if (!$FrameworkViews) {
-    $sourceRoot = [System.IO.Path]::GetFullPath((Join-Path $docfxRoot '../src'))
-    $docfxConfigObject = Get-Content -LiteralPath $docfxConfigPath -Raw | ConvertFrom-Json
-    $metadataProjectPatterns = @(
-        foreach ($metadata in $docfxConfigObject.metadata) {
-            foreach ($source in $metadata.src) {
-                $metadataSourceRoot = if ($source.src) {
-                    [System.IO.Path]::GetFullPath((Join-Path $docfxRoot $source.src))
-                } else {
-                    $docfxRoot
-                }
-
-                foreach ($file in $source.files) {
-                    (Join-Path $metadataSourceRoot $file).Replace('/', [System.IO.Path]::DirectorySeparatorChar)
-                }
-            }
-        }
-    )
-
-    if (-not (Test-Path -LiteralPath $sourceRoot -PathType Container)) {
-        throw "The metadata source root was not found: $sourceRoot"
-    }
-    $sourceProjects = @(Get-ChildItem -LiteralPath $sourceRoot -Recurse -File -Filter '*.csproj')
-    $metadataProjects = @(
-        $sourceProjects |
-            Where-Object {
-                $projectPath = $_.FullName
-                foreach ($pattern in $metadataProjectPatterns) {
-                    if ($projectPath -like $pattern) {
-                        return $true
-                    }
-                }
-
-                return $false
-            }
-    )
-
-    $sourceProjectsHaveRestoreAssets = $sourceProjects.Count -gt 0
-    foreach ($project in $sourceProjects) {
-        $restoreAssetsPath = Join-Path $project.DirectoryName 'obj/project.assets.json'
-        if (-not (Test-Path -LiteralPath $restoreAssetsPath -PathType Leaf)) {
-            $sourceProjectsHaveRestoreAssets = $false
-            break
-        }
-    }
-
-    $useNoRestore = $metadataProjects.Count -gt 0 -and $sourceProjectsHaveRestoreAssets
-    $restoreInputNames = @('Directory.Build.props', 'Directory.Build.targets', 'Directory.Packages.props', 'NuGet.Config', 'nuget.config', 'global.json')
-    foreach ($project in $metadataProjects) {
-        $restoreAssetsPath = Join-Path $project.DirectoryName 'obj/project.assets.json'
-        if (-not (Test-Path -LiteralPath $restoreAssetsPath -PathType Leaf)) {
-            $useNoRestore = $false
-            break
-        }
-
-        $restoreAssetsLastWriteTime = (Get-Item -LiteralPath $restoreAssetsPath).LastWriteTimeUtc
-        $restoreInputPaths = [System.Collections.Generic.List[string]]::new()
-        $restoreInputPaths.Add($project.FullName)
-
-        $inputDirectory = $project.DirectoryName
-        while ($inputDirectory) {
-            foreach ($name in $restoreInputNames) {
-                $restoreInputPath = Join-Path $inputDirectory $name
-                if (Test-Path -LiteralPath $restoreInputPath -PathType Leaf) {
-                    $restoreInputPaths.Add($restoreInputPath)
-                }
-            }
-
-            $parentDirectory = Split-Path -Parent $inputDirectory
-            if (-not $parentDirectory -or $parentDirectory -eq $inputDirectory) {
-                break
-            }
-
-            $inputDirectory = $parentDirectory
-        }
-
-        $lockFilePath = Join-Path $project.DirectoryName 'packages.lock.json'
-        if (Test-Path -LiteralPath $lockFilePath -PathType Leaf) {
-            $restoreInputPaths.Add($lockFilePath)
-        }
-
-        $userNuGetConfigPaths = [System.Collections.Generic.List[string]]::new()
-        if ($env:APPDATA) {
-            $userNuGetConfigPaths.Add((Join-Path $env:APPDATA 'NuGet/NuGet.Config'))
-        }
-        if ($env:HOME) {
-            $userNuGetConfigPaths.Add((Join-Path $env:HOME '.nuget/NuGet/NuGet.Config'))
-        }
-        foreach ($userNuGetConfigPath in $userNuGetConfigPaths) {
-            if (Test-Path -LiteralPath $userNuGetConfigPath -PathType Leaf) {
-                $restoreInputPaths.Add($userNuGetConfigPath)
-            }
-        }
-
-        foreach ($restoreInputPath in $restoreInputPaths | Sort-Object -Unique) {
-            if ((Get-Item -LiteralPath $restoreInputPath).LastWriteTimeUtc -gt $restoreAssetsLastWriteTime) {
-                $useNoRestore = $false
-                break
-            }
-        }
-
-        if (-not $useNoRestore) {
-            break
-        }
-    }
-}
-
 $runnerTemp = if ($env:RUNNER_TEMP) {
     $env:RUNNER_TEMP
 } else {
     [System.IO.Path]::GetTempPath()
 }
-$toolPath = Join-Path $runnerTemp "docfx-$DocfxVersion-tools"
-New-Item -ItemType Directory -Force -Path $toolPath | Out-Null
-& dotnet tool install --tool-path $toolPath docfx --version $DocfxVersion
-if ($LASTEXITCODE -ne 0) {
-    throw "Could not install DocFX CLI version $DocfxVersion."
-}
-$env:PATH = "$toolPath$([System.IO.Path]::PathSeparator)$env:PATH"
+$runnerTemp = [IO.Path]::GetFullPath($runnerTemp)
 
 $outputPath = [System.IO.Path]::GetFullPath($OutputPath)
 $outputDirectory = Split-Path -Parent $outputPath
 New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
 if (Test-Path -LiteralPath $outputPath) {
     throw "OCI archive output already exists; choose a fresh output path: $outputPath"
+}
+$checksumPath = "$outputPath.sha256"
+if (Test-Path -LiteralPath $checksumPath) {
+    throw "OCI checksum output already exists; choose a fresh output path: $checksumPath"
 }
 
 $platformList = @($Platforms.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -206,36 +106,76 @@ if (-not ($platformList -contains 'linux/amd64') -or -not ($platformList -contai
 }
 
 $apiRoot = Join-Path $docfxRoot 'api'
-$builderName = "docfx-oci-$PID"
+$temporaryRoot = Join-Path $runnerTemp "docfx-oci-$([guid]::NewGuid().ToString('N'))"
+$originalPath = $env:PATH
+$builderName = Split-Path -Leaf $temporaryRoot
 $builderCreated = $false
-$frameworkRoot = $null
+$exportStarted = $false
+$exportCompleted = $false
+$engineContainer = $null
+$legacyMetadataStarted = $false
+$locationPushed = $false
 $contextPath = $docfxRoot
-Push-Location $docfxRoot
 try {
-    if ($FrameworkViews) {
-        $settingsPath = [IO.Path]::GetFullPath($FrameworkViews, $workspaceRoot)
-        $frameworkRoot = Join-Path $runnerTemp "docfx-framework-oci-$([guid]::NewGuid().ToString('N'))"
-        & "$PSScriptRoot/Build-DocfxFrameworkViews.ps1" -DocfxConfig $docfxConfigPath `
-            -OutputRoot "$frameworkRoot/build" -SettingsPath $settingsPath
-        $contextPath = "$frameworkRoot/image"
+    New-Item -ItemType Directory -Force -Path $temporaryRoot | Out-Null
+    if ($frameworkViewsEnabled) {
+        $builderImage = 'codebeltnet/docfx:2'
+        Write-Host "Using DocFX framework-view builder image '$builderImage'."
+        $containerCommand = @'
+$ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+New-Item -ItemType Directory -Path /tmp/workspace | Out-Null
+& /bin/cp -R /docfx-source/. /tmp/workspace
+Set-Location /tmp/workspace
+
+& /opt/docfx/framework-views/Build-DocfxFrameworkViews.ps1 -DocfxConfig $env:DOCFX_CONFIG -OutputRoot /tmp/docfx-output
+exit $LASTEXITCODE
+'@
+        $engineContainer = & docker create --pull always --mount "type=bind,source=$workspaceRoot,target=/docfx-source,readonly" `
+            --env "DOCFX_CONFIG=$configRelative" --entrypoint pwsh `
+            -- $builderImage -NoProfile -NonInteractive -Command $containerCommand
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not create a container from DocFX builder image '$builderImage'. Confirm the upstream release has published this tag and the runner can pull it from Docker Hub."
+        }
+        & docker start --attach $engineContainer
+        if ($LASTEXITCODE -ne 0) {
+            throw "DocFX framework views failed in '$builderImage'. Use a builder image with the shared framework-view engine and the SDKs required by the consumer projects."
+        }
+        $contextPath = Join-Path $temporaryRoot 'image'
         New-Item -ItemType Directory -Path $contextPath | Out-Null
-        Move-Item -LiteralPath "$frameworkRoot/build/site", "$frameworkRoot/build/nginx.conf" -Destination $contextPath
-    } elseif ($useNoRestore) {
-        Write-Host 'All restore assets match current restore inputs; generating DocFX metadata without restoring again.'
-        & docfx metadata $docfxConfigName --noRestore
+        $containerFiles = @('/tmp/docfx-output/site', '/tmp/docfx-output/nginx.conf')
+        if ($bundledPackaging) {
+            $containerFiles += '/opt/docfx/framework-views/framework-views.Dockerfile'
+            $dockerfilePath = Join-Path $contextPath 'framework-views.Dockerfile'
+        }
+        foreach ($path in $containerFiles) {
+            & docker cp "${engineContainer}:$path" $contextPath
+            if ($LASTEXITCODE -ne 0) {
+                throw "Could not retrieve '$path' from DocFX builder image '$builderImage'."
+            }
+        }
     } else {
-        Write-Host 'Restore assets are missing or stale; allowing DocFX metadata to restore its source projects.'
+        $toolPath = Join-Path $temporaryRoot 'tools'
+        & dotnet tool install --tool-path $toolPath docfx --version $DocfxVersion
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not install DocFX CLI version $DocfxVersion."
+        }
+        $env:PATH = "$toolPath$([System.IO.Path]::PathSeparator)$originalPath"
+        Push-Location $docfxRoot
+        $locationPushed = $true
+        Write-Host 'Generating legacy DocFX metadata.'
+        $legacyMetadataStarted = $true
         & docfx metadata $docfxConfigName
-    }
-    if (!$FrameworkViews -and $LASTEXITCODE -ne 0) {
-        throw "DocFX metadata generation failed with exit code $LASTEXITCODE."
+        if ($LASTEXITCODE -ne 0) {
+            throw "DocFX metadata generation failed with exit code $LASTEXITCODE."
+        }
     }
 
     & docker buildx version
     if ($LASTEXITCODE -ne 0) {
         throw 'Docker Buildx is not available.'
     }
-    & docker buildx create --name $builderName --driver docker-container --use
+    & docker buildx create --name $builderName --driver docker-container
     if ($LASTEXITCODE -ne 0) {
         throw 'Could not create a Docker Buildx builder for the OCI export.'
     }
@@ -255,41 +195,52 @@ try {
         '--annotation', "index:org.opencontainers.image.version=$Version"
         '--annotation', "index:org.opencontainers.image.revision=$Revision"
         '--output', $outputSpec
-        if ($FrameworkViews -and !$bundledPackaging) { '--build-context'; "docfx-source=$docfxRoot" }
+        if ($frameworkViewsEnabled -and !$bundledPackaging) { '--build-context'; "docfx-source=$docfxRoot" }
         $contextPath
     )
+    $exportStarted = $true
     & docker buildx @buildArguments
     if ($LASTEXITCODE -ne 0) {
-        throw "Docker Buildx failed to create the DocFX OCI artifact with exit code $LASTEXITCODE."
+        throw "Docker Buildx failed to create the DocFX OCI artifact with exit code $LASTEXITCODE. For registry authorization errors, authenticate with docker login before invoking the action (docker login dhi.io for the bundled Dockerfile). Buildx uses the caller's Docker configuration and credential helpers."
     }
+    if (-not (Test-Path -LiteralPath $outputPath -PathType Leaf)) {
+        throw "Docker Buildx completed without creating the expected OCI archive: $outputPath"
+    }
+    $archiveHash = (Get-FileHash -LiteralPath $outputPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $checksumText = "$archiveHash  $([System.IO.Path]::GetFileName($outputPath))$([System.Environment]::NewLine)"
+    [System.IO.File]::WriteAllText($checksumPath, $checksumText, [System.Text.UTF8Encoding]::new($false))
+    $exportCompleted = $true
 } finally {
+    if ($exportStarted -and !$exportCompleted) {
+        Remove-Item -LiteralPath $outputPath, $checksumPath -ErrorAction SilentlyContinue
+    }
     if ($builderCreated) {
         & docker buildx rm $builderName | Out-Null
     }
-    Pop-Location
+    if ($engineContainer) {
+        & docker rm -f $engineContainer | Out-Null
+    }
+    if ($locationPushed) {
+        Pop-Location
+    }
+    $env:PATH = $originalPath
 
-    if ($frameworkRoot -and (Test-Path -LiteralPath $frameworkRoot -PathType Container)) {
-        $temporary = (Resolve-Path -LiteralPath $frameworkRoot).Path
+    if (Test-Path -LiteralPath $temporaryRoot -PathType Container) {
+        $temporary = (Resolve-Path -LiteralPath $temporaryRoot).Path
         $relative = [IO.Path]::GetRelativePath([IO.Path]::GetFullPath($runnerTemp), $temporary)
-        if ($relative -match '^docfx-framework-oci-[a-f0-9]{32}$') { Remove-Item -LiteralPath $temporary -Recurse -Force }
-    } elseif (!$FrameworkViews -and (Test-Path -LiteralPath $apiRoot -PathType Container)) {
-        Get-ChildItem -LiteralPath $apiRoot -Recurse -File |
+        if ($relative -match '^docfx-oci-[a-f0-9]{32}$') { Remove-Item -LiteralPath $temporary -Recurse -Force }
+    }
+    if ($legacyMetadataStarted -and (Test-Path -LiteralPath $apiRoot -PathType Container)) {
+        Get-ChildItem -LiteralPath $apiRoot -Recurse -File -Force |
             Where-Object { $_.Extension -eq '.yml' -or $_.Name -eq '.manifest' } |
             Remove-Item -Force
     }
 }
 
-if (-not (Test-Path -LiteralPath $outputPath -PathType Leaf)) {
-    throw "Docker Buildx completed without creating the expected OCI archive: $outputPath"
+try {
+    Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value @("archive-path=$outputPath", "checksum-path=$checksumPath") -Encoding utf8
+} catch {
+    Remove-Item -LiteralPath $outputPath, $checksumPath -ErrorAction SilentlyContinue
+    throw
 }
-$checksumPath = "$outputPath.sha256"
-$archiveHash = (Get-FileHash -LiteralPath $outputPath -Algorithm SHA256).Hash.ToLowerInvariant()
-$checksumText = "$archiveHash  $([System.IO.Path]::GetFileName($outputPath))$([System.Environment]::NewLine)"
-[System.IO.File]::WriteAllText($checksumPath, $checksumText, [System.Text.UTF8Encoding]::new($false))
-
-if (-not $env:GITHUB_OUTPUT) {
-    throw 'GITHUB_OUTPUT is not available; this build script must run from a GitHub Action.'
-}
-Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "archive-path=$outputPath" -Encoding utf8
-Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "checksum-path=$checksumPath" -Encoding utf8
-Write-Host "Created OCI archive $outputPath for $Version at $Revision."
+Write-Host "Exported OCI archive $outputPath for $Version at $Revision."

@@ -15,15 +15,16 @@ inputs:
     required: false
     default: .docfx/docfx.json
   dockerfile:
-    description: Workspace-relative Dockerfile, or bundled-framework-views to opt into the standard framework-view image. Defaults to .docfx/Dockerfile.docfx for legacy builds.
+    description: Workspace-relative Dockerfile. Defaults to the bundled framework-view Dockerfile when enabled and .docfx/Dockerfile.docfx otherwise.
     required: false
   docfx-version:
-    description: DocFX CLI version used to generate metadata.
+    description: DocFX CLI version for legacy metadata. Framework-view builds use the CLI in the builder image.
     required: false
     default: 2.81.0
   framework-views:
-    description: Path to the optional framework views settings JSON, relative to the workspace.
+    description: Set to true to build native documentation views for the evaluated project frameworks.
     required: false
+    default: 'false'
   platforms:
     description: Comma-separated target platform list for the OCI image.
     required: false
@@ -31,13 +32,13 @@ inputs:
 outputs:
   archive-path:
     description: Absolute path to the verified OCI archive.
-    value: ${{ steps.build.outputs.archive-path }}
+    value: ${{ steps.verify.outcome == 'success' && steps.verify.outputs.digest && steps.build.outputs.archive-path || '' }}
   checksum-path:
     description: Absolute path to the archive SHA-256 file.
-    value: ${{ steps.build.outputs.checksum-path }}
+    value: ${{ steps.verify.outcome == 'success' && steps.verify.outputs.digest && steps.build.outputs.checksum-path || '' }}
   digest:
     description: SHA-256 digest of the embedded OCI image index.
-    value: ${{ steps.verify.outputs.digest }}
+    value: ${{ steps.verify.outcome == 'success' && steps.verify.outputs.digest || '' }}
 runs:
   using: composite
   steps:
@@ -80,7 +81,7 @@ runs:
         }
 
     - id: build
-      name: Generate DocFX metadata and build the OCI image archive
+      name: Build documentation and export the OCI image archive
       shell: pwsh
       env:
         ACTION_PATH: ${{ github.action_path }}
@@ -104,6 +105,16 @@ runs:
         checksum-path: ${{ steps.build.outputs.checksum-path }}
         version: ${{ inputs.version }}
         revision: ${{ inputs.revision }}
+
+    - name: Remove unverified artifacts on verification failure
+      if: ${{ always() && steps.build.outcome == 'success' && (steps.verify.outcome != 'success' || !steps.verify.outputs.digest) }}
+      shell: pwsh
+      env:
+        ARCHIVE_PATH: ${{ steps.build.outputs.archive-path }}
+        CHECKSUM_PATH: ${{ steps.build.outputs.checksum-path }}
+      run: |
+        Remove-Item -LiteralPath $env:ARCHIVE_PATH, $env:CHECKSUM_PATH -ErrorAction Stop
+        throw 'OCI verification did not complete with a verified digest.'
 branding:
   icon: 'umbrella'
   color: 'blue'
