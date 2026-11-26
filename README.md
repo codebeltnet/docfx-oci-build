@@ -72,7 +72,7 @@ Set `framework-views: true` and keep `docfx-config` in the checked-out workspace
     framework-views: true
 ```
 
-Framework views use `codebeltnet/docfx:2.81.0-v1.1.0`. The tag selects DocFX CLI 2.81.0 and Codebelt engine 1.1.0 independently of the consumer release `version` and the legacy-only `docfx-version` input. The action logs the tag and pulls it from Docker Hub. The upstream builder is the tool image that generates the site. The OCI archive returned by this action contains the consumer's documentation and carries the consumer's release version and source revision. See the [release notes and builder update procedure](RELEASE.md).
+Framework views use the stable major-version tag `codebeltnet/docfx:2`. The action logs the tag and uses `--pull always` to pick up compatible upstream releases as Codebelt promotes them. The `docfx-version` input selects the CLI for legacy builds only. The OCI archive contains the consumer's generated documentation and carries the consumer's release version and source revision. See [builder validation](RELEASE.md#builder-validation).
 
 The builder reads `.docfx/docfx.json` by default and uses MSBuild to discover the target frameworks. The checkout is mounted read-only and copied inside the container, including Git metadata, signing keys in the checkout, MSBuild imports, project references, templates and content. The builder must contain the SDKs required by the projects and any `global.json` constraints. Runner NuGet credentials, external credential providers, the runner's home directory, and files outside the checkout are unavailable inside the isolated builder. Framework-view consumers need restore sources accessible from the builder. [DocFX framework-view documentation](https://github.com/codebeltnet/docfx/tree/main/framework-views)
 
@@ -124,10 +124,11 @@ pwsh -NoProfile -File ./tests/Test-ActionContract.ps1
 actionlint
 ```
 
-For local Docker validation, put a clone of `codebeltnet/oci-artifact-verify` alongside this repository and set `$verifier` to the full path of its `verify-oci-artifact.cs`. After publication the integration script pulls the approved builder tag. Before publication use the verified local candidate from the [release procedure](RELEASE.md) by passing `-LocalBuilder` to the test script.
+For local Docker validation, put a clone of `codebeltnet/oci-artifact-verify` alongside this repository and set `$verifier` to the full path of its `verify-oci-artifact.cs`. Check both published builder manifests, then run the integration scenarios against the builder currently published under `codebeltnet/docfx:2`.
 
 ```powershell
 $testRoot = [IO.Path]::GetTempPath()
+./tests/Test-PublishedBuilder.ps1
 ./tests/Test-Integration.ps1 -Scenario Bundled -OutputPath (Join-Path $testRoot 'docfx-bundled.oci.tar') -VerifierPath $verifier
 ./tests/Test-Integration.ps1 -Scenario Custom -OutputPath (Join-Path $testRoot 'docfx-custom.oci.tar') -VerifierPath $verifier
 ./tests/Test-Integration.ps1 -Scenario Legacy -OutputPath (Join-Path $testRoot 'docfx-legacy.oci.tar') -VerifierPath $verifier
