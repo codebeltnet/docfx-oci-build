@@ -67,16 +67,13 @@ jobs:
         with:
           ref: ${{ github.sha }}
       - uses: codebeltnet/install-dotnet@v3
-      - name: Prepare the upstream framework-view builder
-        id: candidate
+      - name: Verify the published framework-view builder
         shell: pwsh
-        run: ./tests/Initialize-IntegrationBuilder.ps1
+        run: ./tests/Test-PublishedBuilder.ps1
       - name: Generate and export framework views with bundled packaging
         id: bundled
         shell: pwsh
-        env:
-          LOCAL_BUILDER: ${{ steps.candidate.outputs.local-image }}
-        run: ./tests/Test-Integration.ps1 -Scenario Bundled -LocalBuilder $env:LOCAL_BUILDER -OutputPath "$env:RUNNER_TEMP/framework-bundled.tar"
+        run: ./tests/Test-Integration.ps1 -Scenario Bundled -OutputPath "$env:RUNNER_TEMP/framework-bundled.tar"
       - name: Verify bundled documentation OCI archive
         uses: codebeltnet/oci-artifact-verify@v1
         with:
@@ -87,9 +84,7 @@ jobs:
       - name: Generate and export framework views with consumer packaging
         id: custom
         shell: pwsh
-        env:
-          LOCAL_BUILDER: ${{ steps.candidate.outputs.local-image }}
-        run: ./tests/Test-Integration.ps1 -Scenario Custom -LocalBuilder $env:LOCAL_BUILDER -OutputPath "$env:RUNNER_TEMP/framework-custom.tar"
+        run: ./tests/Test-Integration.ps1 -Scenario Custom -OutputPath "$env:RUNNER_TEMP/framework-custom.tar"
       - name: Verify custom documentation OCI archive
         uses: codebeltnet/oci-artifact-verify@v1
         with:
@@ -120,11 +115,9 @@ jobs:
           }
       - name: Exercise Docker failure paths and confirm cleanup
         shell: pwsh
-        env:
-          LOCAL_BUILDER: ${{ steps.candidate.outputs.local-image }}
         run: |
           foreach ($scenario in 'UnavailableBuilder', 'GenerationFailure', 'MissingOutput', 'ExportFailure') {
-            ./tests/Test-Integration.ps1 -Scenario $scenario -LocalBuilder $env:LOCAL_BUILDER -OutputPath "$env:RUNNER_TEMP/failure-$scenario.tar"
+            ./tests/Test-Integration.ps1 -Scenario $scenario -OutputPath "$env:RUNNER_TEMP/failure-$scenario.tar"
           }
 
   quality-gate:
